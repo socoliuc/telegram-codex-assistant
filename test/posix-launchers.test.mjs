@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 const isPosix = process.platform !== 'win32';
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'telegram posix launcher-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'telegram posix launcher-')));
   mkdirSync(join(root, 'scripts'));
   mkdirSync(join(root, 'src'));
   const nodePath = process.execPath.replaceAll("'", "'\\''");

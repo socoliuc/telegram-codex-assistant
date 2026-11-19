@@ -76,7 +76,9 @@ test('lifecycle capture stores only activity metadata, never prompts, commands o
     assert.equal(event.event, 'Stop');
     const saved = readLifecycleEvents(events);
     assert.equal(saved.length, 1);
-    assert.ok(!JSON.stringify(saved).includes('private'));
+    for (const value of ['private prompt', 'private command', 'private response']) {
+      assert.ok(!JSON.stringify(saved).includes(value));
+    }
     assert.equal(recordLifecycleEvent(events, { hook_event_name: 'Unknown', cwd: dir, session_id: '../escape' }), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

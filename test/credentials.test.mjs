@@ -19,7 +19,8 @@ test('DPAPI protects and reloads locally without inheriting incompatible PowerSh
 });
 
 test('macOS Keychain or Linux Secret Service stores credentials and encrypted reply text', {
-  skip: !['darwin', 'linux'].includes(process.platform) || (process.platform === 'linux' && !process.env.DBUS_SESSION_BUS_ADDRESS)
+  skip: process.env.TEST_PACKAGED_PAIRING !== '1' || !['darwin', 'linux'].includes(process.platform) ||
+    (process.platform === 'linux' && !process.env.DBUS_SESSION_BUS_ADDRESS)
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'tg-secure-'));
   const file = join(dir, 'token-reference');

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requireNativeExecutable } from '../src/executables.mjs';
@@ -18,7 +18,7 @@ test('POSIX startup accepts executable Codex files and rejects non-executable fi
   try {
     writeFileSync(executable, '#!/bin/sh\nexit 0\n');
     chmodSync(executable, 0o700);
-    assert.equal(requireNativeExecutable(executable), executable);
+    assert.equal(requireNativeExecutable(executable), realpathSync(executable));
     chmodSync(executable, 0o600);
     assert.throws(() => requireNativeExecutable(executable), /not executable/);
   } finally { rmSync(folder, { recursive: true, force: true }); }

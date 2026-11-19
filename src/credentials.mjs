@@ -39,70 +39,28 @@ function accountFor(file) {
 
 function keychainGet(account) {
   if (process.platform === 'darwin')
-    return macKeychain('get', account);
+    return run('/usr/bin/security', ['find-generic-password', '-s', service, '-a', account, '-w']);
   if (process.platform === 'linux')
     return run('secret-tool', ['lookup', 'service', service, 'account', account]);
   throw new Error('Secure credentials require Windows, macOS Keychain, or Linux Secret Service.');
 }
 
 function keychainSet(account, secret, replace = true) {
-  if (process.platform === 'darwin')
-    macKeychain(replace ? 'set' : 'add', account, secret);
+  if (process.platform === 'darwin') {
+    if (!/^[A-Za-z0-9:_-]+$/.test(secret)) throw new Error('The macOS credential contains unsupported characters.');
+    const command = `add-generic-password ${replace ? '-U ' : ''}-s ${service} -a ${account} -w ${secret}\nquit\n`;
+    const result = spawnSync('/usr/bin/security', ['-i'], { input: command, encoding: 'utf8', timeout: 15_000, maxBuffer: 128_000 });
+    if (result.error || result.status !== 0 || keychainGet(account) !== secret)
+      throw new Error('The macOS Keychain is unavailable or locked.');
+  }
   else if (process.platform === 'linux')
     run('secret-tool', ['store', '--label=Telegram Codex Assistant', 'service', service, 'account', account], secret);
   else throw new Error('Secure credentials require Windows, macOS Keychain, or Linux Secret Service.');
 }
 
 function keychainDelete(account) {
-  if (process.platform === 'darwin') macKeychain('delete', account);
+  if (process.platform === 'darwin') run('/usr/bin/security', ['delete-generic-password', '-s', service, '-a', account]);
   else if (process.platform === 'linux') run('secret-tool', ['clear', 'service', service, 'account', account]);
-}
-
-function macKeychain(operation, account, secret = '') {
-  const escapedAccount = JSON.stringify(account);
-  const script = `ObjC.import('Foundation'); ObjC.import('Security');
-function run(argv) {
-  var query = $.NSMutableDictionary.dictionary;
-  query.setObject_forKey($.kSecClassGenericPassword, $.kSecClass);
-  query.setObject_forKey($("${service}"), $.kSecAttrService);
-  query.setObject_forKey($(${escapedAccount}), $.kSecAttrAccount);
-  if (argv[0] === 'delete') { var deleted = Number($.SecItemDelete(query)); if (deleted !== 0 && deleted !== -25300) throw new Error('Keychain delete failed ' + deleted); return ''; }
-  if (argv[0] === 'get') {
-    query.setObject_forKey(true, $.kSecReturnData);
-    query.setObject_forKey($.kSecMatchLimitOne, $.kSecMatchLimit);
-    var result = Ref(); var status = $.SecItemCopyMatching(query, result);
-    if (status !== 0) throw new Error('Keychain lookup failed ' + status);
-    var data = ObjC.unwrap(result[0]);
-    var value = ObjC.unwrap($(data).base64EncodedStringWithOptions(0));
-    return value;
-  }
-  var input = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
-  var value = $.NSString.alloc.initWithDataEncoding(input, $.NSUTF8StringEncoding);
-  var data = $(value).dataUsingEncoding($.NSUTF8StringEncoding);
-  query.setObject_forKey(data, $.kSecValueData);
-  query.setObject_forKey($.kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, $.kSecAttrAccessible);
-  var status = Number($.SecItemAdd(query, null));
-  if (status === -25299 && argv[0] === 'set') {
-    var match = $.NSMutableDictionary.dictionary;
-    match.setObject_forKey($.kSecClassGenericPassword, $.kSecClass);
-    match.setObject_forKey($("${service}"), $.kSecAttrService);
-    match.setObject_forKey($(${escapedAccount}), $.kSecAttrAccount);
-    var update = $.NSMutableDictionary.dictionary; update.setObject_forKey(data, $.kSecValueData);
-    status = Number($.SecItemUpdate(match, update));
-  }
-  if (status !== 0) throw new Error('Keychain write failed ' + status);
-  return '';
-}`;
-  const result = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, operation], {
-    input: secret, encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 128_000
-  });
-  if (result.status !== 0) {
-    const error = new Error('The macOS Keychain is unavailable or locked.');
-    error.stderr = result.stderr;
-    throw error;
-  }
-  if (operation === 'get') return Buffer.from(result.stdout.trim(), 'base64').toString('utf8');
-  return '';
 }
 
 function getKey(create) {

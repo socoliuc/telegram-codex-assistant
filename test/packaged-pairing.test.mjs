@@ -31,6 +31,8 @@ test('pair from the packaged setup page and open Home', {
   const launcher = process.platform === 'darwin' ? 'Setup.command' : 'setup.sh';
   cpSync(resolve(launcher), join(root, launcher));
   const local = join(root, '.local');
+  const project = join(temp, 'Atlas');
+  mkdirSync(project);
   const token = '987654:' + randomBytes(24).toString('hex');
   const mock = join(temp, 'telegram-fixture.mjs');
   writeFileSync(mock, `
@@ -73,7 +75,7 @@ test('pair from the packaged setup page and open Home', {
     const url = await waitFor(() => existsSync(urlFile) && readFileSync(urlFile, 'utf8'), 'Setup did not publish its local URL.');
     assert.equal((await fetch(url)).status, 200);
     const post = await fetch(url + '/connect', { method: 'POST', headers: { Origin: new URL(url).origin },
-      body: new URLSearchParams({ username: 'fixture_bot', token }) });
+      body: new URLSearchParams({ username: 'fixture_bot', token, projects: 'Atlas | ' + project }) });
     assert.equal(post.status, 200, 'The packaged setup could not connect the fixture bot.');
     await waitFor(() => {
       const log = join(root, 'delivery.jsonl');
@@ -84,6 +86,7 @@ test('pair from the packaged setup page and open Home', {
       });
     }, 'The paired owner did not receive the Auto Home panel.');
     assert.equal(JSON.parse(readFileSync(join(local, 'state.json'))).owner.userId, 17);
+    assert.equal(JSON.parse(readFileSync(join(local, 'health.json'))).projectCount, 1);
     assert.ok(!readFileSync(join(local, 'config.json'), 'utf8').includes(token));
   } finally {
     try {
