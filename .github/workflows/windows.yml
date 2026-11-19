@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - { platform: windows, runner: windows-latest }
-          - { platform: macos, runner: macos-15 }
+          - { platform: macos, runner: macos-15-intel }
           - { platform: linux, runner: ubuntu-latest }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
