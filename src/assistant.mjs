@@ -8,6 +8,7 @@ import { isVisible } from './inbox.mjs';
 import { questionChoices } from './choices.mjs';
 import { classifyMessage, routeKeyboard } from './message-routing.mjs';
 import { protectMessage, unprotectMessage } from './credentials.mjs';
+import { ChatBrowser } from './chat-browser.mjs';
 
 const activeStates = new Set(['dispatching', 'running', 'awaiting_approval', 'stopping', 'uncertain', 'interrupted']);
 const input = (text, images = []) => [{ type: 'text', text: text + (images.length ?
@@ -99,6 +100,7 @@ export class Assistant {
     this.pending = new Map();
     this.questionReplies = new Map();
     this.controls = new Controls(this);
+    this.chats = new ChatBrowser(this);
     this.serial = Promise.resolve();
     this.loadedCoordinators = new Set();
     this.updatedPermissionThreads = new Set();
@@ -602,6 +604,7 @@ export class Assistant {
     if (String(q.data).startsWith('ctl:')) return this.controls.callback(q);
     if (String(q.data).startsWith('route:')) return this.chooseMessageRoute(q);
     if (String(q.data).startsWith('project:')) return this.selectProject(q);
+    if (String(q.data).startsWith('browse:')) return this.chats.choose(q);
     const [action, key] = String(q.data).split(':');
     const p = this.pending.get(key);
     if (!p || !['approve', 'decline'].includes(action) || p.method === 'item/tool/requestUserInput') {
@@ -727,6 +730,7 @@ export class Assistant {
       await this.telegram.call('answerCallbackQuery', { callback_query_id: q.id, text: 'That project is unavailable. Open /project again or select General.' }); return;
     }
     this.store.data.selectedProjectId = projectId;
+    delete this.store.data.generalDestination;
     delete this.store.data.projectPicker;
     this.store.save();
     try { await this.telegram.call('answerCallbackQuery', { callback_query_id: q.id, text: project ? redact('Selected ' + project.name, [this.telegram.token]).slice(0, 180) : 'Auto routing on' }); }
@@ -761,11 +765,12 @@ export class Assistant {
       }
       return;
     }
-    const command = !image && text.match(/^\/(menu|help|start|inbox|settings|connection|updates|project|projects|status|cleanup)(?:@\w+)?$/)?.[1];
+    const command = !image && text.match(/^\/(menu|help|start|inbox|settings|connection|updates|project|projects|chats|general|status|cleanup)(?:@\w+)?$/)?.[1];
     if (command) {
       this.controls.housekeeping.record(m, 'command');
       await this.controls.open({ menu: 'home', help: 'home', start: 'home', inbox: 'attention:0', settings: 'settings',
-        connection: 'health', updates: 'updates:0', project: 'projects', projects: 'projects', status: 'running', cleanup: 'cleanup' }[command], undefined, m.message_id); return;
+        connection: 'health', updates: 'updates:0', project: 'projects', projects: 'projects', chats: 'browse', general: 'general',
+        status: 'running', cleanup: 'cleanup' }[command], undefined, m.message_id); return;
     }
     let replyId = String(m.reply_to_message?.message_id ?? '');
     const pendingReply = this.controls.inbox.data.nextReplyMessageId;
@@ -808,7 +813,7 @@ export class Assistant {
     if (this.store.data.inputReplies?.[replyId]) {
       await this.controls.help('That question expired or its native session restarted. Your answer was not sent to another project. Ask to continue the original task after checking its status.'); return;
     }
-    const desktopRoute = this.store.data.desktopReplies?.[replyId];
+    const desktopRoute = this.store.data.desktopReplies?.[replyId] || (!replyId && !jobCommand && this.store.data.activeChat);
     if (desktopRoute) {
       this.controls.housekeeping.trackReply(m, desktopRoute.inboxId);
       this.serial = this.serial.catch(()=>{}).then(async()=>{
@@ -842,6 +847,7 @@ export class Assistant {
       await this.controls.help('I cannot identify the original conversation for that message. Open /inbox or /updates, then reply to an item’s Details message. Nothing was sent to the selected project.'); return;
     }
     const selectedProjectId = this.store.data.selectedProjectId || null;
+    const generalDestination = this.store.data.generalDestination;
     this.controls.housekeeping.trackReply(m, undefined, Boolean(replyJob));
     // Serialize starts/steers, while approval callbacks bypass this queue above.
     this.serial = this.serial.catch(() => {}).then(async () => {
@@ -852,7 +858,7 @@ export class Assistant {
         if (['running', 'awaiting_approval'].includes(replyJob.status))
           await this.rpc.call('turn/steer', { threadId: replyJob.threadId, expectedTurnId: replyJob.turnId, input: input(text, images) });
         else await this.dispatch(replyJob.projectId, text, undefined, images);
-      } else if (!replyJob && !selectedProjectId) {
+      } else if (!replyJob && !selectedProjectId && !generalDestination) {
         if (await this.routeFreshMessage(text, images, m.message_id) === 'awaiting-route') return;
       } else await this.coordinate(text, replyJob ? (replyJob.scopeProjectId || this.coordinatorProject(replyJob.threadId)) : selectedProjectId, images);
       this.controls.housekeeping.submitted(m.message_id);

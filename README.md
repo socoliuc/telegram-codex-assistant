@@ -33,6 +33,8 @@ On a CLI-only installation, add your project folders to give **Auto** destinatio
 | Control | What it does |
 | --- | --- |
 | **Home** · `/menu` | Shows the current destination and cancels a pending one-message reply. |
+| **Projects** · `/chats` | Choose a project, open a Codex chat, and read its recent messages. **Message here** sends new messages to that chat until you leave it. Codex replies appear automatically in Telegram. |
+| **General** · `/general` | Sends new messages to General and offers to clear recent bot panels and notices. |
 | **Inbox** · `/inbox` | Opens requests that need attention. Choose an offered answer or open a task to reply. |
 | **Switch project** · `/projects` | Pins a project for new messages. Select **Auto** to route each new message independently. |
 | **Running** · `/status` | Lists current desktop activity and work requested through Telegram. |

@@ -80,9 +80,9 @@ export class DesktopTools {
     }
     return result;
   }
-  async read(threadId, hostId = 'local', { turnLimit: requestedTurns = 10 } = {}) {
+  async read(threadId, hostId = 'local', { turnLimit: requestedTurns = 10, includeOutputs = false } = {}) {
     if (!Number.isInteger(requestedTurns) || requestedTurns < 1 || requestedTurns > 10) throw new Error('Invalid desktop turn limit.');
-    const args = { threadId, hostId, includeOutputs: false, maxOutputCharsPerItem: 8000 };
+    const args = { threadId, hostId, includeOutputs, maxOutputCharsPerItem: includeOutputs ? 1600 : 8000 };
     for (const turnLimit of [requestedTurns, ...[2, 1].filter(n => n < requestedTurns)]) {
       try { return await this.call('read_thread', { ...args, turnLimit }); }
       catch (error) {

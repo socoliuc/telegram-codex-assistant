@@ -49,6 +49,79 @@ function fixture(options = {}) {
   return { dir, store, rpc, sent, telegramCalls, assistant, cleanup() { assistant.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
+test('browse a Codex project, preview its exact chat, then send there until leaving for General', async () => {
+  const f = fixture();
+  const tracker = [];
+  const message = text => ({ from: { id: 1 }, chat: { id: 1, type: 'private' }, message_id: 100, text });
+  const click = async label => {
+    const rows = f.telegramCalls.findLast(c => c.method === 'editMessageText')?.params.reply_markup.inline_keyboard ||
+      f.sent.at(-1).keyboard.inline_keyboard;
+    const button = rows.flat().find(button => typeof label === 'string' ? button.text === label : label.test(button.text));
+    assert.ok(button, 'Expected button ' + label);
+    await f.assistant.callback({ id: 'callback', data: button.callback_data, from: { id: 1 },
+      message: { chat: { id: 1, type: 'private' }, message_id: 1 } });
+    return button.callback_data;
+  };
+  try {
+    f.assistant.desktop = {
+      excludeThreadIds: () => ['managed'],
+      tools: { async read(threadId, host, options) {
+        tracker.push({ threadId, host, options });
+        return { thread: { id: 'chat', cwd: projectA }, turns: [{ items: [
+          { type: 'userMessage', content: [{ type: 'text', text: 'A prior request' }] },
+          { type: 'agentMessage', phase: 'final_answer', text: 'A prior answer' }
+        ] }] };
+      } },
+      async reply(route, text) { tracker.push({ route, text }); return { status: 'queued' }; }
+    };
+    const call = f.rpc.call.bind(f.rpc);
+    f.rpc.call = async (method, params) => {
+      if (method !== 'thread/list') return call(method, params);
+      assert.deepEqual(params.cwd, [projectA]);
+      return { data: [
+        { id: 'chat', cwd: projectA, name: 'Homepage discussion' },
+        { id: 'other', cwd: projectB, name: 'Another project' },
+        { id: 'managed', cwd: projectA, name: 'Managed session' }
+      ] };
+    };
+    await f.assistant.controls.open('browse');
+    await click('A');
+    assert.equal(tracker.length, 0, 'listing chats must not read their histories');
+    const list = f.telegramCalls.findLast(c => c.method === 'editMessageText').params;
+    assert.doesNotMatch(JSON.stringify(list.reply_markup), /Another project|Managed session/);
+    const stale = await click('Homepage discussion');
+    const preview = f.telegramCalls.findLast(c => c.method === 'editMessageText').params;
+    assert.match(preview.text, /A · Homepage discussion[\s\S]*A prior request[\s\S]*A prior answer/);
+    assert.equal(f.store.data.activeChat, undefined);
+    await click('Message here');
+    assert.equal(f.store.data.activeChat.threadId, 'chat');
+    await f.assistant.handleUpdate({ update_id: 9, message: message('Follow up here') });
+    await f.assistant.serial;
+    assert.deepEqual(tracker[1].route.threadId, 'chat');
+    assert.equal(tracker[1].text, 'Follow up here');
+    assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').length, 0);
+    await click('Refresh messages');
+    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Recent messages[\s\S]*Type a message below/);
+    assert.equal(f.store.data.activeChat.threadId, 'chat');
+    f.assistant.controls.housekeeping.record({ message_id: 90 }, 'help');
+    f.assistant.controls.housekeeping.record({ message_id: 91 }, 'command');
+    await click('General');
+    assert.equal(f.store.data.activeChat, undefined);
+    assert.equal(f.store.data.generalDestination, true);
+    assert.ok(!f.assistant.controls.housekeeping.records['90'].dismissedAt);
+    await click(/^Clear recent bot panels and notices · \d+$/);
+    assert.ok(f.assistant.controls.housekeeping.records['90'].dismissedAt);
+    assert.ok(!f.assistant.controls.housekeeping.records['91'].dismissedAt);
+    f.assistant.classifyMessage = async () => { assert.fail('General should bypass Auto'); };
+    await f.assistant.handleUpdate({ update_id: 10, message: message('Question in General') });
+    await f.assistant.serial;
+    assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').length, 1);
+    await f.assistant.callback({ id: 'stale', data: stale, from: { id: 1 },
+      message: { chat: { id: 1, type: 'private' }, message_id: 1 } });
+    assert.equal(tracker.length, 3);
+  } finally { f.cleanup(); }
+});
+
 test('owner photos keep captions, largest size, selected project and one submission per update', async () => {
   const f = fixture({ executionAccess: 'desktop-full-access' });
   try {

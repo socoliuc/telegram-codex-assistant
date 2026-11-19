@@ -68,7 +68,16 @@ export class Controls {
     return id ? { message_id: Number(id) } : undefined;
   }
   open(view = 'home', message, afterMessageId = 0) {
-    if (view === 'home') this.clearReplyDestination();
+    if (view === 'home' || view === 'general' || view === 'browse') this.clearReplyDestination();
+    if (this.store.data.activeChat || view === 'general') {
+      delete this.store.data.activeChat;
+      if (view === 'general') {
+        this.store.data.generalDestination = true;
+        this.store.data.selectedProjectId = null;
+        delete this.store.data.projectPicker;
+      }
+      this.store.save();
+    }
     const run = async () => {
       const explicit = this.inbox.data.panels[String(message?.message_id)];
       let target = explicit && explicit.view !== 'digest' ? message : this.activePanel();
@@ -78,7 +87,8 @@ export class Controls {
       const previous = target && target.message_id < afterMessageId ? this.inbox.data.panels[String(target.message_id)] : null;
       if (previous) target = undefined;
       const projects = /^projects(?::(\d+))?$/.exec(view);
-      const render = () => projects ? this.a.showProjectPicker(target, Number(projects[1] || 0)) : this.show(view, target, true);
+      const render = () => view === 'browse' ? this.a.chats.projects(target) :
+        projects ? this.a.showProjectPicker(target, Number(projects[1] || 0)) : this.show(view, target, true);
       let id;
       try { id = await render(); }
       catch (error) {
@@ -325,7 +335,7 @@ export class Controls {
     const settings = this.inbox.data.settings;
     const selected = this.a.projects.find(p => p.id === this.store.data.selectedProjectId);
     const attention = this.inbox.list(), snoozed = this.inbox.list('snoozed');
-    if (view === 'cleanup') {
+    if (view === 'cleanup' || view === 'general') {
       const currentId = String(message?.message_id || this.inbox.data.homePanelId || '');
       cleanupOffer = { nonce: randomBytes(6).toString('hex'), expiresAt: this.inbox.now() + 5 * 60_000,
         targets: {
@@ -334,11 +344,25 @@ export class Controls {
           updates: this.inbox.list('updates').filter(item => item.kind === 'completion').map(item => item.id)
         } };
     }
-    if (view === 'home') {
-      const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' : 'Auto');
+    if (view === 'general') {
+      const recent = this.inbox.now() - 48 * 60 * 60_000;
+      cleanupOffer.targets.panels = cleanupOffer.targets.panels.filter(id => this.inbox.data.panels[id]?.sentAt > recent);
+      cleanupOffer.targets.chat = cleanupOffer.targets.chat.filter(id => {
+        const entry = this.housekeeping.records[id];
+        return entry?.kind === 'help' && entry.sentAt > recent;
+      });
+      const count = cleanupOffer.targets.panels.length + cleanupOffer.targets.chat.length;
+      text = 'General\n\nType a message to send it to General.';
+      rows = count ? [[button(`Clear recent bot panels and notices · ${count}`, 'clean:bot:' + cleanupOffer.nonce)]] : [];
+      rows.push([button('Projects', 'browse'), button('Routing', 'projects'), homeButton]);
+    } else if (view === 'home') {
+      const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' :
+        this.store.data.generalDestination ? 'General' : 'Auto');
       text = `Home\nCurrent project: ${destination}\n\n` + (selected ? 'Type a message to work in this project.' :
-        this.store.data.selectedProjectId ? 'Choose an available project before sending a task.' : 'Type a message. I’ll find its project or keep it in General.');
-      rows = [[button(`✉ Inbox · ${attention.length}`, 'attention:0')], [button('⇄ Switch project', 'projects')],
+        this.store.data.selectedProjectId ? 'Choose an available project before sending a task.' :
+        this.store.data.generalDestination ? 'Type a message to send it to General.' : 'Type a message. I’ll find its project or keep it in General.');
+      rows = [[button('Projects', 'browse'), button('General', 'general')],
+        [button(`✉ Inbox · ${attention.length}`, 'attention:0'), button('⇄ Switch project', 'projects')],
         [button('▶ Running', 'running'), button('≡ Updates', 'updates:0')], [button('More ›', 'more')]];
     } else if (view === 'more') {
       text = 'More\n\nAlerts: ' + this.activity.status().label;
@@ -404,12 +428,13 @@ export class Controls {
   }
   async runCleanup(q, scope, nonce) {
     const panel = this.inbox.data.panels[String(q.message?.message_id)], offer = panel?.cleanupOffer;
-    if (!panel || panel.dismissedAt || !['cleanup', 'home'].includes(panel.view) || (panel.view === 'home' && scope !== 'all') || !offer || offer.usedAt ||
-        offer.nonce !== nonce || offer.expiresAt <= this.inbox.now() || !['all', 'panels', 'chat', 'updates'].includes(scope))
+    const scopes = { cleanup: ['all', 'panels', 'chat', 'updates'], home: ['all'], general: ['bot'] };
+    if (!panel || panel.dismissedAt || !scopes[panel.view]?.includes(scope) || !offer || offer.usedAt ||
+        offer.nonce !== nonce || offer.expiresAt <= this.inbox.now())
       return this.confirm(q, 'This cleanup selection expired. Open Cleanup again.');
     offer.usedAt = this.inbox.now(); this.store.save();
     let count = 0;
-    if (['panels', 'all'].includes(scope)) {
+    if (['panels', 'all', 'bot'].includes(scope)) {
       for (const id of offer.targets.panels) {
         const target = this.inbox.data.panels[id];
         if (!target || target.dismissedAt || id === String(q.message.message_id) || id === String(this.inbox.data.homePanelId)) continue;
@@ -417,14 +442,14 @@ export class Controls {
       }
       this.store.save();
     }
-    if (['chat', 'all'].includes(scope)) count += this.housekeeping.queue(offer.targets.chat);
+    if (['chat', 'all', 'bot'].includes(scope)) count += this.housekeeping.queue(offer.targets.chat);
     if (scope === 'updates') for (const id of offer.targets.updates) {
       const item = this.inbox.get(id);
       if (item?.kind === 'completion' && isVisible(item) && this.inbox.review(id)) count++;
     }
     await this.confirm(q, count ? scope === 'updates' ? `${count} updates marked reviewed.` : `Cleanup started for ${count} messages.` : 'Nothing to clear here.');
     await this.flush();
-    return this.open(scope === 'all' ? panel.view : 'cleanup', q.message);
+    return this.open(['all', 'bot'].includes(scope) ? panel.view : 'cleanup', q.message);
   }
   freshness() {
     const health = this.a.desktop?.health;
@@ -494,6 +519,7 @@ export class Controls {
     }
     panel.dismissedAt ||= this.inbox.now(); panel.expiresAt = 0;
     panel.cleanup ||= { sentAt: panel.sentAt };
+    if (String(this.store.data.activeChat?.panelId) === id) delete this.store.data.activeChat;
     if (String(this.inbox.data.homePanelId) === id) delete this.inbox.data.homePanelId;
     this.store.save();
     await this.cleanupPanel(id);

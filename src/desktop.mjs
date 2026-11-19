@@ -4,6 +4,20 @@ import { Inbox, isOpen, needsAttention } from './inbox.mjs';
 import { questionChoices, choiceRevision, questionAnswered, reconcileSavedChoices } from './choices.mjs';
 
 const terminal = new Set(['completed','failed','interrupted']);
+const replyWatchMs = 24 * 60 * 60_000;
+
+function containsRequest(turn, marker) {
+  if (!marker) return false;
+  return (turn.items || []).some(item => {
+    if (item.type === 'userMessage') return (item.content || []).some(content =>
+      content.type === 'text' && content.text?.startsWith(marker));
+    if (item.type !== 'functionCallOutput' || item.namespace !== 'codex_app' || item.name !== 'send_message_to_thread') return false;
+    const text = item.output?.text;
+    const envelope = typeof text === 'string' &&
+      /^<codex_delegation>\s*<source_thread_id>[^<]+<\/source_thread_id>\s*<input>\s*/.exec(text);
+    return Boolean(envelope && text.slice(envelope[0].length).startsWith(marker));
+  });
+}
 // The desktop read tool flattens request_user_input_async into a final-answer
 // message keyed by its tool call, omitting delivery/questions and waiting flags.
 const isQuestion = item => item.type === 'agentMessage' && (item.questions?.length ||
@@ -76,8 +90,49 @@ export class DesktopMonitor {
     if (this.inflight) return this.inflight;
     if (this.lastScanStartedAt !== undefined && this.now() - this.lastScanStartedAt < this.minimumScanMs) return Promise.resolve();
     this.lastScanStartedAt = this.now();
-    this.inflight = this.update().finally(() => { this.inflight = null; });
+    this.inflight = this.scanRequestedReplies().then(() => this.update()).finally(() => { this.inflight = null; });
     return this.inflight;
+  }
+  async scanRequestedReplies() {
+    const now = this.now();
+    const excluded = new Set(this.excludeThreadIds());
+    const pending = Object.values(this.store.data.desktopSubmissions).filter(submission =>
+      submission.watchReply && submission.status === 'submitted' && !submission.replyObservedAt &&
+      now - Date.parse(submission.at) <= replyWatchMs && !excluded.has(submission.threadId));
+    const byThread = new Map();
+    for (const submission of pending.sort((a, b) => (a.replyCheckedAt || 0) - (b.replyCheckedAt || 0))) {
+      const group = byThread.get(submission.threadId) || [];
+      group.push(submission);
+      byThread.set(submission.threadId, group);
+    }
+    for (const [id, group] of [...byThread].slice(0, 2)) {
+      if (this.closed) return;
+      for (const submission of group) submission.replyCheckedAt = now;
+      try {
+        const { thread, turns } = await this.tools.read(id, 'local', { turnLimit: 3, includeOutputs: true });
+        if (this.closed || thread?.id !== id || (thread.hostId && thread.hostId !== 'local') ||
+            (thread.cwd && isWithinRoots(thread.cwd, this.excludeRoots))) continue;
+        const project = projectForChat(this.loadProjects(), thread.cwd, thread.projectId);
+        for (const submission of group) {
+          const turn = (turns || []).find(turn => containsRequest(turn, submission.requestMarker));
+          if (!turn || !terminal.has(turn.status)) continue;
+          const final = (turn.items || []).findLast(item => item.type === 'agentMessage' &&
+            [undefined, null, 'final_answer'].includes(item.phase) && !isQuestion(item) && item.text)?.text;
+          if (!final && turn.status === 'completed') continue;
+          const label = `${project?.name || 'General'} · ${thread.title || '(untitled)'}`;
+          submission.resultTurnId = turn.id;
+          const route = { threadId: id, hostId: 'local', turnId: turn.id, direct: true, label,
+            projectId: project?.id || null, kind: turn.status === 'completed' ? 'completion' : 'failure',
+            origin: { cwd: thread.cwd, projectId: thread.projectId || null },
+            imageRoots: [thread.cwd, ...(project?.roots || [])].filter(Boolean), context: final?.slice(0, 1800) || '' };
+          const text = final || `Codex reported this reply as ${turn.status}.`;
+          await this.notice(`local:${id}:${turn.id}:terminal`, `${label}\n\n${text}`, route, undefined, true,
+            { sourceAt: Number(turn.completedAt) * 1000 || now, imageSource: final });
+          submission.replyObservedAt = now;
+        }
+      } catch { /* Retry reads for the watched chat without resending the prompt. */ }
+      this.store.save();
+    }
   }
   async update() {
     try {
@@ -300,8 +355,7 @@ export class DesktopMonitor {
       if (submission.resultTurnId || !submission.requestMarker) continue;
       // A follow-up may be queued behind existing work. Only the turn containing
       // our actual user input is its answer; timestamps cannot prove ownership.
-      if ((turn.items || []).some(item => item.type === 'userMessage' && (item.content || []).some(content =>
-          content.type === 'text' && content.text?.startsWith(submission.requestMarker)))) {
+      if (containsRequest(turn, submission.requestMarker)) {
         submission.resultTurnId = turn.id; direct = true;
       }
     }
@@ -337,8 +391,11 @@ export class DesktopMonitor {
     const id = String(updateId);
     if (this.store.data.desktopSubmissions[id]) throw new Error('This reply was already submitted or has an unknown outcome; inspect the original Codex conversation.');
     if (!route?.threadId || route.hostId !== 'local') throw new Error('The original conversation route is unavailable.');
-    const current = await this.tools.read(route.threadId,route.hostId);
+    const current = await this.tools.read(route.threadId, route.hostId, route.kind === 'chat' ? { turnLimit: 1 } : undefined);
     if (current?.thread?.id !== route.threadId) throw new Error('The original conversation is unavailable. Nothing was sent to another project.');
+    if (route.kind === 'chat' && (this.excludeThreadIds().includes(route.threadId) ||
+        projectForChat(this.loadProjects(), current.thread.cwd, current.thread.projectId)?.id !== route.projectId))
+      throw new Error('This chat has moved. Open it again from Projects.');
     const item = route.inboxId && this.inbox.get(route.inboxId);
     let savedChoices = [];
     if (['input', 'approval'].includes(route.kind)) {
@@ -392,8 +449,11 @@ export class DesktopMonitor {
     if (item && route.kind === 'input') item.answerSubmissionId = id;
     this.store.data.desktopSubmissions[id] = { threadId:route.threadId, status:'sending', at:new Date().toISOString(), requestMarker }; this.store.save();
     try {
-      const result = await this.tools.send(route.threadId, `${requestMarker} to this earlier ${route.kind} from this conversation:\n<quoted_context>\n${route.context || ''}\n</quoted_context>\n\nHis new message:\n${text}`, route.hostId);
+      const prompt = route.kind === 'chat' ? `${requestMarker} in this conversation:\n\n${text}` :
+        `${requestMarker} to this earlier ${route.kind} from this conversation:\n<quoted_context>\n${route.context || ''}\n</quoted_context>\n\nHis new message:\n${text}`;
+      const result = await this.tools.send(route.threadId, prompt, route.hostId);
       this.store.data.desktopSubmissions[id].status = 'submitted';
+      this.store.data.desktopSubmissions[id].watchReply = true;
       for (const { saved } of savedChoices) saved.status = 'submitted';
       this.store.save();
       if (item) { item.replySentAt = Date.now(); this.store.save(); }

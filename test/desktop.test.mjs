@@ -26,6 +26,41 @@ function fixture() {
   return {dir,store,histories,sent,submitted,tools,monitor,put,cleanup(){rmSync(dir,{recursive:true,force:true});}};
 }
 
+test('an existing chat returns only its Telegram-requested reply when desktop status polling fails', async () => {
+  const f = fixture();
+  try {
+    f.put('source', 'a', 'older');
+    await f.monitor.reply({ threadId: 'source', hostId: 'local', projectId: 'a', kind: 'chat' }, 'Dry run', 701);
+    f.tools.list = async () => { throw new Error('Desktop discovery unavailable'); };
+    const original = f.tools.read;
+    const reads = [];
+    f.tools.read = async (id, host, options) => {
+      reads.push({ id, host, options });
+      return original(id);
+    };
+    const marker = f.store.data.desktopSubmissions['701'].requestMarker;
+    const wrapped = `<codex_delegation>\n  <source_thread_id>sender</source_thread_id>\n  <input>\n${marker} in this conversation:\n\nDry run\n  </input>\n</codex_delegation>`;
+    const target = f.histories.get('source');
+    target.turns.unshift({ id: 'unrelated', status: 'completed', items: [
+      { type: 'agentMessage', phase: 'final_answer', text: wrapped }
+    ] });
+    await f.monitor.scan();
+    assert.equal(f.sent.length, 0);
+    target.turns[1] = { id: 'requested', status: 'completed', items: [
+      { type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: wrapped } },
+      { type: 'agentMessage', phase: 'final_answer', text: 'Verified reply' }
+    ] };
+    await f.monitor.scan();
+    await f.monitor.scan();
+    assert.deepEqual(reads, Array(2).fill({ id: 'source', host: 'local', options: { turnLimit: 3, includeOutputs: true } }));
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0].text, /A · Task source[\s\S]*Verified reply/);
+    assert.equal(f.store.data.desktopSubmissions['701'].resultTurnId, 'requested');
+    assert.equal(f.store.data.desktopReplies['1'].direct, true);
+    assert.equal(f.submitted.length, 1);
+  } finally { f.cleanup(); }
+});
+
 test('desktop completion routes remain tied to original projects across restart and selection changes',async()=>{
   const f=fixture();try{
     f.put('desktop-a','a','a-1');f.put('desktop-b','b','b-1');

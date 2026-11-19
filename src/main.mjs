@@ -130,6 +130,8 @@ try {
     // refresh must not prevent the listener from starting or replay work.
     telegram.call('setMyCommands', { scope: { type: 'chat', chat_id: store.data.owner.chatId }, commands: [
       { command: 'menu', description: 'Home' },
+      { command: 'chats', description: 'Browse projects and Codex chats' },
+      { command: 'general', description: 'Open General and show cleanup' },
       { command: 'inbox', description: 'Answer questions and review requests' },
       { command: 'project', description: 'Switch project or use Auto' },
       { command: 'status', description: 'See running work' },
