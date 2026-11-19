@@ -7,11 +7,13 @@ import { join, sep, basename } from 'node:path';
 
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
 function temporary() {
-  const dir = mkdtempSync(join(tmpdir(), 'tg-startup-'));
+  // Windows runners can expose TEMP through an 8.3 alias. Match the path
+  // PowerShell uses for PSScriptRoot when simulating an existing installation.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'tg-startup-')));
   mkdirSync(join(dir, 'scripts')); mkdirSync(join(dir, '.local'));
   writeFileSync(join(dir, '.local', 'config.json'), '{}');
   return { dir, cleanup() {
-    assert.ok(realpathSync(dir).startsWith(realpathSync(tmpdir()) + sep) && basename(dir).startsWith('tg-startup-'));
+    assert.ok(realpathSync.native(dir).startsWith(realpathSync.native(tmpdir()) + sep) && basename(dir).startsWith('tg-startup-'));
     rmSync(dir, { recursive: true, force: true });
   } };
 }
