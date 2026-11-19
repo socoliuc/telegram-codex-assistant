@@ -45,13 +45,29 @@ function keychainGet(account) {
   throw new Error('Secure credentials require Windows, macOS Keychain, or Linux Secret Service.');
 }
 
-function keychainSet(account, secret, replace = true) {
+function keychainSet(account, secret) {
   if (process.platform === 'darwin') {
     if (!/^[A-Za-z0-9:_-]+$/.test(secret)) throw new Error('The macOS credential contains unsupported characters.');
-    const command = `add-generic-password ${replace ? '-U ' : ''}-s ${service} -a ${account} -w ${secret}\nquit\n`;
+    // Interactive mode reads the command from stdin and exits on EOF.
+    const command = `add-generic-password -U -s ${service} -a ${account} -w ${secret}\n`;
     const result = spawnSync('/usr/bin/security', ['-i'], { input: command, encoding: 'utf8', timeout: 15_000, maxBuffer: 128_000 });
-    if (result.error || result.status !== 0 || keychainGet(account) !== secret)
-      throw new Error('The macOS Keychain is unavailable or locked.');
+    if (result.error || result.status !== 0) {
+      const error = new Error('The macOS Keychain is unavailable or locked.');
+      error.exitStatus = result.status;
+      throw error;
+    }
+    let saved;
+    try { saved = keychainGet(account); }
+    catch {
+      const error = new Error('The macOS Keychain is unavailable or locked.');
+      error.verificationFailed = true;
+      throw error;
+    }
+    if (saved !== secret) {
+      const error = new Error('The macOS Keychain is unavailable or locked.');
+      error.verificationMismatch = true;
+      throw error;
+    }
   }
   else if (process.platform === 'linux')
     run('secret-tool', ['store', '--label=Telegram Codex Assistant', 'service', service, 'account', account], secret);
