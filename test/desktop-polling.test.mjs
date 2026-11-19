@@ -344,6 +344,25 @@ test('poll failures do not fall back to expensive history scans', async () => {
   } finally { f.cleanup(); }
 });
 
+test('the adapter status error can verify a fresh local completion without scanning other chats', async () => {
+  const f = fixture(); try {
+    const ready = f.put('ready', 'completed');
+    ready.turns[0].items = [{ type: 'agentMessage', phase: 'final_answer', text: 'Completed from the hook' }];
+    f.put('unrelated');
+    f.monitor.loadEvents = () => [{ id: 'ready-event', event: 'Stop', sessionId: 'ready',
+      turnId: ready.turns[0].id, receivedAt: new Date(f.monitor.now()).toISOString() }];
+    f.tools.poll = async () => {
+      throw Object.assign(new Error('Codex tools/call: Codex app tool request failed'), { code: -32000 });
+    };
+    await f.monitor.scan();
+    assert.deepEqual(f.reads.map(read => read.id), ['ready']);
+    assert.equal(f.monitor.health.status, 'limited');
+    assert.ok(f.monitor.inbox.list('updates').some(item => item.text.includes('Completed from the hook')));
+    await f.monitor.scan();
+    assert.deepEqual(f.reads.map(read => read.id), ['ready']);
+  } finally { f.cleanup(); }
+});
+
 test('a new user turn acknowledges an earlier result without fetching the older turn', async () => {
   const f = fixture(); try {
     const h = f.put('one');

@@ -133,7 +133,7 @@ try {
       { command: 'chats', description: 'Browse projects and Codex chats' },
       { command: 'general', description: 'Open General and show cleanup' },
       { command: 'inbox', description: 'Answer questions and review requests' },
-      { command: 'project', description: 'Switch project or use Auto' },
+      { command: 'project', description: 'Set routing or use Auto' },
       { command: 'status', description: 'See running work' },
       { command: 'updates', description: 'Read recent updates' }
     ] }).catch(()=>{});
@@ -157,7 +157,7 @@ try {
       for (const update of updates) {
         if (stopping || stopRequested()) { await stop(); break; }
         try { await assistant.handleUpdate(update); }
-        catch { await assistant.send('The instruction could not complete. Check /status before retrying; no automatic replay was attempted.'); }
+        catch { await assistant.controls.help('The instruction could not complete. Check /status before retrying; no automatic replay was attempted.'); }
       }
     } catch (e) {
       if (stopping) break;

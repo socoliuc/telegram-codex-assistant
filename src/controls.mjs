@@ -354,7 +354,7 @@ export class Controls {
       const count = cleanupOffer.targets.panels.length + cleanupOffer.targets.chat.length;
       text = 'General\n\nType a message to send it to General.';
       rows = count ? [[button(`Clear recent bot panels and notices · ${count}`, 'clean:bot:' + cleanupOffer.nonce)]] : [];
-      rows.push([button('Projects', 'browse'), button('Routing', 'projects'), homeButton]);
+      rows.push([button('⌂', 'home')]);
     } else if (view === 'home') {
       const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' :
         this.store.data.generalDestination ? 'General' : 'Auto');
@@ -362,11 +362,12 @@ export class Controls {
         this.store.data.selectedProjectId ? 'Choose an available project before sending a task.' :
         this.store.data.generalDestination ? 'Type a message to send it to General.' : 'Type a message. I’ll find its project or keep it in General.');
       rows = [[button('Projects', 'browse'), button('General', 'general')],
-        [button(`✉ Inbox · ${attention.length}`, 'attention:0'), button('⇄ Switch project', 'projects')],
-        [button('▶ Running', 'running'), button('≡ Updates', 'updates:0')], [button('More ›', 'more')]];
+        [button(`Inbox · ${attention.length}`, 'attention:0'), button('Updates', 'updates:0')],
+        [button('Running', 'running'), button('More', 'more')]];
     } else if (view === 'more') {
       text = 'More\n\nAlerts: ' + this.activity.status().label;
-      rows = [[button('Alert settings', 'settings')], [button('Connection', 'health'), button('Cleanup', 'cleanup')], [homeButton]];
+      rows = [[button('Routing', 'projects'), button('Alert settings', 'settings')],
+        [button('Connection', 'health'), button('Cleanup', 'cleanup')], [homeButton]];
     } else if (/^(attention|snoozed|updates):\d+$/.test(view)) {
       const [filter, rawPage] = view.split(':');
       const items = this.inbox.list(filter), pages = Math.max(1, Math.ceil(items.length / 5));
@@ -454,14 +455,18 @@ export class Controls {
   freshness() {
     const health = this.a.desktop?.health;
     const stale = !health?.lastScanAt || this.inbox.now() - Date.parse(health.lastScanAt) > 120_000;
-    return `Desktop monitoring: ${health?.status === 'connected' && !stale ? 'connected' : 'not current'}${health?.lastScanAt ? ' · checked ' + this.age(Date.parse(health.lastScanAt)) : ''}${health?.readFailures ? ` · ${health.readFailures} chats unavailable` : ''}.`;
+    const status = stale ? 'not current' : health.status === 'limited' ? 'recent local events only' :
+      health.status === 'connected' ? 'connected' : 'not current';
+    return `Desktop monitoring: ${status}${health?.lastScanAt ? ' · checked ' + this.age(Date.parse(health.lastScanAt)) : ''}${health?.readFailures ? ` · ${health.readFailures} chats unavailable` : ''}.`;
   }
   age(at) { const minutes = Math.max(0, Math.floor((this.inbox.now() - at) / 60_000)); return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`; }
   async panel(text, keyboard, message, view, options = { silent: true }) {
     const rows = [...(keyboard?.inline_keyboard || [])], last = rows.at(-1);
-    const close = button('Close', 'close');
-    if (last?.length < 3 && last.some(b => ['ctl:home', 'ctl:more'].includes(b.callback_data))) rows[rows.length - 1] = [...last, close];
-    else rows.push([close]);
+    if (!['browse', 'chat-list', 'chat-preview', 'chat-active', 'general', 'projects'].includes(view)) {
+      const close = button('Close', 'close');
+      if (last?.length < 3 && last.some(b => ['ctl:home', 'ctl:more'].includes(b.callback_data))) rows[rows.length - 1] = [...last, close];
+      else rows.push([close]);
+    }
     keyboard = { ...keyboard, inline_keyboard: rows };
     const id = String(message?.message_id);
     const panel = this.inbox.data.panels[id];

@@ -30,7 +30,7 @@ Atlas | /home/you/projects/atlas
 
 Use the actual path on your computer. On macOS it might start with `/Users/you/`. Compatible Codex desktop registrations are also discovered automatically. With Auto selected, an ambiguous project request opens the project picker before work starts.
 
-To change folders later, stop the listener and edit only the `projects` property of `.local/config.json`. Each entry has a `name` and an absolute `root`. Start the listener and open **Switch project** to check the list.
+To change folders later, stop the listener and edit only the `projects` property of `.local/config.json`. Each entry has a `name` and an absolute `root`. Start the listener and open **Projects** to check the list.
 
 ## Check the connection
 

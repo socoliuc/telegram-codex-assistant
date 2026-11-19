@@ -199,15 +199,34 @@ export class DesktopMonitor {
       // Bound the hidden status hydration as well as explicit read_thread calls.
       const selected = changed.slice(0, this.maxReadsPerScan);
       let deferred = changed.length - selected.length;
-      const snapshots = selected.length ? await this.tools.poll(selected.map(row => ({ threadId: row.id, hostId: row.hostId || 'local',
-        ...(watch.threads[row.id]?.pollCursor ? { afterCursor: watch.threads[row.id].pollCursor } : {}) }))) : { polls: [], errors: [] };
+      let statusUnavailable = false;
+      let snapshots = { polls: [], errors: [] };
+      if (selected.length) {
+        try {
+          snapshots = await this.tools.poll(selected.map(row => ({ threadId: row.id, hostId: row.hostId || 'local',
+            ...(watch.threads[row.id]?.pollCursor ? { afterCursor: watch.threads[row.id].pollCursor } : {}) })));
+        } catch (error) {
+          if (error.code !== -32000 || error.message !== 'Codex tools/call: Codex app tool request failed') throw error;
+          statusUnavailable = true;
+        }
+      }
       const byId = new Map(snapshots.polls.map(poll => [poll.thread?.id, poll]));
       const expiredHooks = new Set((snapshots.errors || []).filter(error =>
         !listedIds.has(error.threadId) && /^No Codex thread found for threadId:/.test(error.message || '')).map(error => error.threadId));
-      for (const row of selected) {
+      // When status snapshots fail, use fresh hook events to bound and
+      // identify the single turn that can be verified for each affected chat.
+      const hookTurns = new Map();
+      if (statusUnavailable) for (const event of events) {
+        if (!event.turnId || !['Stop', 'PermissionRequest'].includes(event.event)) continue;
+        const ids = hookTurns.get(event.sessionId) || new Set();
+        ids.add(event.turnId);
+        hookTurns.set(event.sessionId, ids);
+      }
+      const toRead = statusUnavailable ? changed.filter(row => hookTurns.has(row.id)).slice(0, this.maxReadsPerScan) : selected;
+      for (const row of toRead) {
         if (this.closed) break;
         const previous = watch.threads[row.id];
-        const poll = byId.get(row.id);
+        const poll = statusUnavailable ? {} : byId.get(row.id);
         if (!poll) {
           if (expiredHooks.has(row.id)) consumed.add(row.id);
           else { readFailures++; recordFailure(row); }
@@ -231,6 +250,7 @@ export class DesktopMonitor {
         }
         const thread = data?.thread;
         if (thread?.id !== row.id || excluded.has(thread.id) || !Array.isArray(data.turns)) continue;
+        if (statusUnavailable && !hookTurns.get(row.id).has(data.turns[0]?.id)) { recordFailure(row); continue; }
         if (thread.cwd && isWithinRoots(thread.cwd, this.excludeRoots)) {
           watch.threads[row.id] = { updatedAt: row.updatedAt, status: row.status, checkedAt: this.now(),
             pollCursor: poll.cursor, latestTurnId: data.turns[0]?.id };
@@ -338,7 +358,7 @@ export class DesktopMonitor {
       }
       watch.eventIds = [...new Set([...watch.eventIds,...events.filter(e => consumed.has(e.sessionId)).map(e=>e.id)])].slice(-1000);
       this.store.save();
-      this.health = { status: 'connected', lastScanAt: new Date(this.now()).toISOString(), threadCount: rows.size,
+      this.health = { status: statusUnavailable ? 'limited' : 'connected', lastScanAt: new Date(this.now()).toISOString(), threadCount: rows.size,
         readFailures, historyReads, backedOff, deferred, statusTargets: selected.length, skippedOld, skippedUnchanged,
         recentActivityMinutes: this.recentActivityMs / 60_000, discovery: 'recent-metadata-first', mode: 'recent-changes' };
     } catch { this.health = { ...this.health, status: 'unavailable' }; }

@@ -84,7 +84,13 @@ test('browse a Codex project, preview its exact chat, then send there until leav
         { id: 'managed', cwd: projectA, name: 'Managed session' }
       ] };
     };
+    f.assistant.projects = [...Array.from({ length: 6 }, (_, i) =>
+      ({ id: 'filler-' + i, name: 'Folder ' + i, roots: [] })), ...f.assistant.projects];
     await f.assistant.controls.open('browse');
+    await click('→');
+    await click('A');
+    await click('←');
+    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Projects · 2\/2/);
     await click('A');
     assert.equal(tracker.length, 0, 'listing chats must not read their histories');
     const list = f.telegramCalls.findLast(c => c.method === 'editMessageText').params;
@@ -100,11 +106,12 @@ test('browse a Codex project, preview its exact chat, then send there until leav
     assert.deepEqual(tracker[1].route.threadId, 'chat');
     assert.equal(tracker[1].text, 'Follow up here');
     assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').length, 0);
-    await click('Refresh messages');
+    await click('↻ Refresh');
     assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Recent messages[\s\S]*Type a message below/);
     assert.equal(f.store.data.activeChat.threadId, 'chat');
     f.assistant.controls.housekeeping.record({ message_id: 90 }, 'help');
     f.assistant.controls.housekeeping.record({ message_id: 91 }, 'command');
+    await click('⌂');
     await click('General');
     assert.equal(f.store.data.activeChat, undefined);
     assert.equal(f.store.data.generalDestination, true);

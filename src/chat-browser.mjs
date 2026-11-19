@@ -2,8 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { redact } from './core.mjs';
 import { projectForChat } from './projects.mjs';
 
-const control = (text, action) => ({ text, callback_data: 'ctl:' + action });
-const navigation = [control('Projects', 'browse'), control('General', 'general'), control('⌂ Home', 'home')];
+const home = { text: '⌂', callback_data: 'ctl:home' };
 const pageSize = 6;
 const chatDate = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
@@ -22,12 +21,18 @@ export class ChatBrowser {
     const clean = redact(String(text || '').trim(), [this.a.telegram.token]);
     return clean.length > limit ? clean.slice(0, limit - 1).trimEnd() + '…' : clean;
   }
-  async panel(text, rows, message, view, options) {
+  async panel(text, message, view, actions = [], { back, next } = {}) {
     const nonce = randomBytes(8).toString('hex');
-    const actions = options || [];
-    const buttons = actions.map(({ label }, index) => [{ text: label, callback_data: `browse:${nonce}:${index}` }]);
-    const id = await this.a.controls.panel(text, { inline_keyboard: [...buttons, ...rows] }, message, view);
-    if (id) this.menu = { id, view, nonce, actions, expires: Date.now() + 30 * 60_000 };
+    const callbacks = [];
+    const action = (label, run) => {
+      const index = callbacks.push(run) - 1;
+      return { text: label, callback_data: `browse:${nonce}:${index}` };
+    };
+    const backButton = back && action('←', back), nextButton = next && action('→', next);
+    const rows = actions.map(({ label, run }) => [action(label, run)]);
+    rows.push([backButton, home, nextButton].filter(Boolean));
+    const id = await this.a.controls.panel(text, { inline_keyboard: rows }, message, view);
+    if (id) this.menu = { id, view, nonce, actions: callbacks, expires: Date.now() + 30 * 60_000 };
     return id;
   }
   async projects(message, requestedPage = 0) {
@@ -36,15 +41,18 @@ export class ChatBrowser {
     const pages = Math.max(1, Math.ceil(projects.length / pageSize));
     const page = Math.min(requestedPage, pages - 1);
     const actions = projects.slice(page * pageSize, (page + 1) * pageSize)
-      .map(project => ({ label: this.safe(project.name, 70), run: msg => this.list(project.id, msg) }));
-    if (page) actions.push({ label: '‹ Previous projects', run: msg => this.projects(msg, page - 1) });
-    if (page + 1 < pages) actions.push({ label: 'More projects ›', run: msg => this.projects(msg, page + 1) });
+      .map(project => ({ label: this.safe(project.name, 70), run: msg => this.list(project.id, msg, page) }));
     return this.panel(`Projects${pages > 1 ? ` · ${page + 1}/${pages}` : ''}\n\nChoose a project to see its Codex chats.`,
-      [navigation.slice(1)], message, 'browse', actions);
+      message, 'browse', actions, {
+        back: page > 0 ? msg => this.projects(msg, page - 1) : undefined,
+        next: page + 1 < pages ? msg => this.projects(msg, page + 1) : undefined
+      });
   }
-  async list(projectId, message, cursor, earlier = []) {
+  async list(projectId, message, projectPage, cursor, earlier = []) {
     const project = this.a.projects.find(p => p.id === projectId);
-    if (!project) return this.projects(message);
+    if (!project) return this.projects(message, projectPage);
+    const back = earlier.length ? msg => this.list(projectId, msg, projectPage, earlier.at(-1), earlier.slice(0, -1)) :
+      msg => this.projects(msg, projectPage);
     let page;
     try {
       page = await this.a.rpc.call('thread/list', {
@@ -53,7 +61,7 @@ export class ChatBrowser {
       });
     } catch {
       return this.panel(`${this.safe(project.name, 100)} · Chats\n\nCodex could not load this project’s chats. Try again.`,
-        [navigation], message, 'chat-list', [{ label: 'Retry', run: msg => this.list(projectId, msg, cursor, earlier) }]);
+        message, 'chat-list', [{ label: 'Retry', run: msg => this.list(projectId, msg, projectPage, cursor, earlier) }], { back });
     }
     const owned = new Set(this.a.desktop?.excludeThreadIds?.() || []);
     const actions = (page.data || []).filter(thread => thread.id && thread.cwd && !owned.has(thread.id) &&
@@ -61,14 +69,14 @@ export class ChatBrowser {
       .map(thread => {
         const updated = updatedLabel(thread.updatedAt);
         return { label: this.safe(thread.name || thread.title || thread.preview || 'Untitled chat', updated ? 50 : 72) +
-          (updated ? ' · ' + updated : ''), run: msg => this.preview(projectId, thread, msg, cursor, earlier) };
+          (updated ? ' · ' + updated : ''), run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier) };
       });
     const hasChats = actions.length > 0;
-    if (earlier.length) actions.push({ label: '‹ Newer chats', run: msg => this.list(projectId, msg, earlier.at(-1), earlier.slice(0, -1)) });
-    if (page.nextCursor) actions.push({ label: 'Older chats ›', run: msg => this.list(projectId, msg, page.nextCursor, [...earlier, cursor]) });
-    actions.push({ label: 'Project Telegram chat', run: msg => this.selectProject(projectId, msg) });
+    actions.push({ label: 'Telegram project chat', run: msg => this.selectProject(projectId, msg) });
     return this.panel(`${this.safe(project.name, 100)} · Chats\n\n${hasChats ? 'Choose a chat to preview it.' : 'No desktop chats on this page.'}`,
-      [navigation], message, 'chat-list', actions);
+      message, 'chat-list', actions, { back,
+        next: page.nextCursor ? msg => this.list(projectId, msg, projectPage, page.nextCursor, [...earlier, cursor]) : undefined
+      });
   }
   selectProject(projectId, message) {
     if (!this.a.projects.some(project => project.id === projectId)) return this.projects(message);
@@ -77,16 +85,16 @@ export class ChatBrowser {
     this.a.store.save();
     return this.a.controls.open('home', message);
   }
-  async preview(projectId, thread, message, cursor, earlier, active = false) {
+  async preview(projectId, thread, message, projectPage, cursor, earlier, active = false) {
     const project = this.a.projects.find(p => p.id === projectId);
     if (!project) return this.projects(message);
-    const back = { label: '‹ Chats', run: msg => {
+    const back = msg => {
       if (this.data.activeChat) {
         delete this.data.activeChat;
         this.a.store.save();
       }
-      return this.list(projectId, msg, cursor, earlier);
-    } };
+      return this.list(projectId, msg, projectPage, cursor, earlier);
+    };
     const title = this.safe(thread.name || thread.title || thread.preview || 'Untitled chat', 100);
     let history;
     try {
@@ -95,9 +103,9 @@ export class ChatBrowser {
           projectForChat(this.a.projects, history.thread.cwd, history.thread.projectId)?.id !== projectId ||
           this.a.desktop.excludeThreadIds().includes(thread.id)) throw new Error('Chat unavailable');
     } catch {
-      const retry = { label: 'Refresh messages', run: msg => this.preview(projectId, thread, msg, cursor, earlier, active) };
+      const retry = { label: 'Retry', run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier, active) };
       return this.panel(`${this.safe(project.name, 100)}\n${title}\n\nThis chat could not be opened. Check the desktop connection and try again.`,
-        [navigation], message, active ? 'chat-active' : 'chat-preview', [retry, back]);
+        message, active ? 'chat-active' : 'chat-preview', [retry], { back });
     }
     const label = this.safe(project.name, 100) + ' · ' + title;
     const excerpts = (history.turns || []).slice(0, 3).reverse().flatMap(({ items = [] }) => {
@@ -110,18 +118,18 @@ export class ChatBrowser {
     const body = excerpts.length ? 'Recent messages\n\n' + excerpts.join('\n\n') : 'This chat has no recent text to preview.';
     const updated = updatedLabel(history.thread.updatedAt || thread.updatedAt);
     const preview = label + (updated ? '\nUpdated ' + updated : '') + '\n\n' + body;
-    const refresh = { label: 'Refresh messages', run: msg => this.preview(projectId, thread, msg, cursor, earlier, true) };
-    if (active) return this.activePanel(preview, message, [refresh, back]);
+    const refresh = { label: '↻ Refresh', run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier, true) };
+    if (active) return this.activePanel(preview, message, refresh, back);
     const route = { threadId: thread.id, hostId: 'local', kind: 'chat', projectId, label };
-    const enter = { label: 'Message here', run: msg => this.activate(route, preview, msg, [refresh, back]) };
-    return this.panel(preview, [navigation], message, 'chat-preview', [enter, back]);
+    const enter = { label: 'Message here', run: msg => this.activate(route, preview, msg, refresh, back) };
+    return this.panel(preview, message, 'chat-preview', [enter], { back });
   }
-  activePanel(preview, message, actions) {
+  activePanel(preview, message, refresh, back) {
     return this.panel(preview + '\n\nType a message below. It goes directly to this Codex chat until you leave.',
-      [navigation], message, 'chat-active', actions);
+      message, 'chat-active', [refresh], { back });
   }
-  async activate(route, preview, message, actions) {
-    const id = await this.activePanel(preview, message, actions);
+  async activate(route, preview, message, refresh, back) {
+    const id = await this.activePanel(preview, message, refresh, back);
     if (id) {
       this.a.controls.clearReplyDestination();
       this.data.activeChat = { ...route, panelId: id };
@@ -138,6 +146,6 @@ export class ChatBrowser {
     if (!action) return this.a.controls.confirm(q, 'This chat menu expired. Open Projects again.');
     this.menu = undefined;
     try { await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id }); } catch {}
-    return action.run(q.message);
+    return action(q.message);
   }
 }

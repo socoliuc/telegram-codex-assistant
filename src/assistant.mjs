@@ -703,10 +703,10 @@ export class Assistant {
     this.projects.slice(page * 6, page * 6 + 6).forEach((p, i) => rows.push([{
       text: (p.id === this.store.data.selectedProjectId ? '✓ ' : '') + redact(p.name, [this.telegram.token]).slice(0, 76),
       callback_data: `project:${nonce}:${page * 6 + i + 1}` }]));
-    if (pages > 1) rows.push([...(page ? [{ text: '‹ Previous', callback_data: 'ctl:projects:' + (page - 1) }] : []),
-      ...(page + 1 < pages ? [{ text: 'Next ›', callback_data: 'ctl:projects:' + (page + 1) }] : [])]);
-    rows.push([{ text: '⌂ Home', callback_data: 'ctl:home' }]);
-    picker.messageId = await this.controls.panel(`Switch project${pages > 1 ? ' · ' + (page + 1) + '/' + pages : ''}\nCurrent project: ${this.store.data.selectedProjectId ? current : 'Auto'}\n\nPick a project for new messages, or let Auto choose each time.${this.context?.snapshot.status === 'stale' ? '\n\nProject list could not refresh. Try again later.' : ''}`,
+    rows.push([...(page ? [{ text: '←', callback_data: 'ctl:projects:' + (page - 1) }] : []),
+      { text: '⌂', callback_data: 'ctl:home' },
+      ...(page + 1 < pages ? [{ text: '→', callback_data: 'ctl:projects:' + (page + 1) }] : [])]);
+    picker.messageId = await this.controls.panel(`Routing${pages > 1 ? ' · ' + (page + 1) + '/' + pages : ''}\nCurrent project: ${this.store.data.generalDestination ? 'General' : this.store.data.selectedProjectId ? current : 'Auto'}\n\nPick a project for new messages, or let Auto choose each time.${this.context?.snapshot.status === 'stale' ? '\n\nProject list could not refresh. Try again later.' : ''}`,
       { inline_keyboard: rows }, message, 'projects');
     this.store.data.projectPicker = picker;
     this.store.save();
