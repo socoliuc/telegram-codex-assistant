@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination", "candidates"],
+  "properties": {
+    "destination": { "type": "string", "enum": ["project", "general", "ask"] },
+    "candidates": { "type": "array", "items": { "type": "integer" } }
+  }
+}

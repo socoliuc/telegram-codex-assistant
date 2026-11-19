@@ -1,0 +1,8 @@
+.local/
+coverage/
+node_modules/
+.env
+.env.*
+*.dpapi
+*.log
+__pycache__/
