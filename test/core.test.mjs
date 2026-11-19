@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StateStore } from '../src/state.mjs';
-import { isOwner, rootsOverlap, redact, splitText, claimUpdate } from '../src/core.mjs';
+import { isOwner, rootsOverlap, isWithinRoots, redact, splitText, claimUpdate } from '../src/core.mjs';
 
 test('only the paired human in their private chat can issue instructions', () => {
   const owner = { userId: 123, chatId: 123 };
@@ -18,10 +18,28 @@ test('only the paired human in their private chat can issue instructions', () =>
   ]) assert.equal(isOwner(message, owner), false);
 });
 
-test('parent roots conflict; sibling names and separate drives do not', () => {
-  assert.equal(rootsOverlap(['D:\\Projects'], ['d:\\projects\\example.test']), true);
-  assert.equal(rootsOverlap(['D:\\Projects\\foo'], ['D:\\Projects\\foobar']), false);
-  assert.equal(rootsOverlap(['D:\\Projects'], ['E:\\Projects']), false);
+test('project roots use the current operating system path rules', () => {
+  if (process.platform === 'win32') {
+    assert.equal(rootsOverlap(['D:\\Projects'], ['d:\\projects\\example.test']), true);
+    assert.equal(rootsOverlap(['D:\\Projects\\foo'], ['D:\\Projects\\foobar']), false);
+    assert.equal(rootsOverlap(['D:\\Projects'], ['E:\\Projects']), false);
+    assert.equal(isWithinRoots('D:\\Projects\\site', ['D:\\Projects']), true);
+    assert.equal(isWithinRoots('D:\\Projects2', ['D:\\Projects']), false);
+  } else {
+    const dir = mkdtempSync(join(tmpdir(), 'tg-roots-'));
+    try {
+      const parent = join(dir, 'Projects');
+      const child = join(parent, 'example.test');
+      const sibling = join(dir, 'Projects2');
+      assert.equal(rootsOverlap([parent], [child]), true);
+      assert.equal(rootsOverlap([parent], [sibling]), false);
+      assert.equal(isWithinRoots(child, [parent]), true);
+      assert.equal(isWithinRoots(sibling, [parent]), false);
+      assert.equal(isWithinRoots('/tmp', ['/']), true);
+      assert.equal(isWithinRoots('/tmp2', ['/tmp']), false);
+      assert.equal(rootsOverlap(['/'], ['/tmp']), true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('state persists claims before effects and recovers in-flight jobs without replay', () => {

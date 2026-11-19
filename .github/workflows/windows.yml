@@ -1,4 +1,4 @@
-name: Windows checks
+name: Platform checks
 on:
   push:
     branches: [main]
@@ -7,19 +7,106 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: windows-latest
+    name: Test ${{ matrix.platform }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows, runner: windows-latest }
+          - { platform: macos, runner: macos-latest }
+          - { platform: linux, runner: ubuntu-latest }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
       - uses: actions/setup-python@v6
+        if: runner.os == 'Windows'
         with:
           python-version: '3.13'
+      - name: Extract the platform release
+        shell: bash
+        run: |
+          node scripts/package-release.mjs "${{ matrix.platform }}" dist
+          mkdir -p unpacked
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            unzip -q dist/*.zip -d unpacked
+          else
+            tar -xzf dist/*.tar.gz -C unpacked
+          fi
+          cd unpacked/*/
+          node -e "require('fs').writeFileSync(process.env.GITHUB_ENV, 'PACKAGE_DIR=' + process.cwd() + '\n', { flag: 'a' })"
       - name: Check setup prerequisites
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.PACKAGE_DIR }}
         shell: powershell
         run: .\scripts\setup.ps1 -CheckOnly
       - name: Run listener tests
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: node --test
       - name: Run Windows launcher tests
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: python -B test/silent-launcher.test.py
+      - name: Install Codex CLI in the runner
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/cli" @openai/codex@0.169.1
+          echo "$RUNNER_TEMP/cli/bin" >> "$GITHUB_PATH"
+      - name: Connect to the native Codex app-server
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          export CODEX_HOME="$(mktemp -d)"
+          codex --version
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { RpcClient } from './src/rpc.mjs';
+          const client = new RpcClient();
+          try {
+            await client.initialize();
+            const threads = await client.call('thread/list', { limit: 1 });
+            assert.ok(Array.isArray(threads.data));
+          } finally { client.close(); }
+          JS
+      - name: Run macOS package tests with an isolated Keychain
+        if: runner.os == 'macOS'
+        env:
+          TEST_PACKAGED_PAIRING: '1'
+        shell: bash
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          keychain="$RUNNER_TEMP/package-test.keychain-db"
+          security create-keychain -p fixture "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security unlock-keychain -p fixture "$keychain"
+          test -x Setup.command && test -x Start.command && test -x Stop.command
+          node --test
+      - name: Run Linux package tests with an isolated Secret Service session
+        if: runner.os == 'Linux'
+        env:
+          TEST_PACKAGED_PAIRING: '1'
+        shell: bash
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsecret-tools gnome-keyring dbus
+          test -x setup.sh && test -x start.sh && test -x stop.sh
+          dbus-run-session -- sh -ec '
+            export XDG_RUNTIME_DIR="$(mktemp -d)"
+            printf "%s" fixture | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            node --test
+          '
+      - name: Save the tested download
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

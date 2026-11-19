@@ -1,10 +1,10 @@
 # Telegram Codex Assistant
 
-Use a private Telegram chat to see which Codex tasks need you, reply to the right project, and check on work running on your Windows PC.
+Use a private Telegram chat to send work to Codex on your Mac, Linux computer, or Windows PC. Pick up a project conversation from your phone and see when a task needs your attention.
 
 ![Example conversation. A heading request goes to the Atlas project. The next question goes to General through Auto.](docs/reply-routing.svg)
 
-[Get started](#get-started-on-windows) · [Learn the controls](#the-controls) · [Setup and troubleshooting](docs/setup.md) · [MIT license](LICENSE)
+[Choose your download](#choose-your-download) · [Learn the controls](#the-controls) · [MIT license](LICENSE)
 
 ## A minute with the bot
 
@@ -12,16 +12,21 @@ Use a private Telegram chat to see which Codex tasks need you, reply to the righ
 2. **Open a project update.** Tap **Open & reply** and type a follow-up. The bot sends that message to the conversation that produced the update.
 3. **Change the subject.** With **Auto** selected, the next plain message is routed again. A clear project request goes to that project, an ordinary question goes to General, and an ambiguous task opens a picker before work starts. Tap **Home** to cancel a reply you have yet to send.
 
-## Get started on Windows
+## Choose your download
 
-You need the Codex desktop app signed in, a native `codex.exe` on PATH, Node.js 24 or newer, and Python 3 with `pythonw.exe` for background startup. Keep the PC awake and online while using the bot. The listener has no npm dependencies.
+Open the latest **Releases** entry on this repository and download the asset for the computer that runs Codex. Extract it to a folder you plan to keep. All editions require **Node.js 24 or newer**, a signed-in Codex CLI, and a computer that stays awake and online. The listener has no npm dependencies.
 
-1. Download and extract the Windows source ZIP from the **Releases** sidebar, or clone this repository.
-2. In Telegram, create a dedicated bot with the verified **@BotFather** and keep its token private. [Open BotFather](https://t.me/BotFather)
-3. Run **Setup.cmd**, then open the local URL printed in its window. Enter the bot username and token there.
-4. Follow the pairing link on that page, press **Start** in your private bot chat, then send **/menu**. The first account to redeem the private pairing link becomes the owner.
+| Your computer | Release asset | Launch setup | Guide |
+| --- | --- | --- | --- |
+| macOS | `*-macos.tar.gz` | `./Setup.command` in Terminal | [Mac setup and Keychain](docs/macos-linux.md#macos) |
+| Linux | `*-linux.tar.gz` | `./setup.sh` in a terminal | [Linux setup and keyring](docs/macos-linux.md#linux) |
+| Windows | `*-windows.zip` | Double-click **Setup.cmd** | [Windows setup and background startup](docs/setup.md) |
 
-Setup starts the listener. Use **Start.cmd** and **Stop.cmd** on subsequent runs. Desktop notifications and automatic startup have separate setup steps. [Installation guide](docs/setup.md)
+1. In Telegram, create a dedicated bot with the verified **@BotFather**. [Open BotFather](https://t.me/BotFather)
+2. Launch setup and open the local URL it prints. Enter the bot username and token on that page.
+3. Open the private pairing link, press **Start** in Telegram, then send **/menu**. The first account to redeem the link becomes the owner.
+
+On a CLI-only installation, add your project folders to give **Auto** destinations beyond General. [Register projects](docs/macos-linux.md#add-project-folders)
 
 ## The controls
 
@@ -39,17 +44,16 @@ Setup starts the listener. Use **Start.cmd** and **Stop.cmd** on subsequent runs
 
 The listener runs on your PC. It receives messages through the Telegram Bot API using long polling and sends project work to the local Codex app-server using your existing Codex sign-in. It needs an outbound connection to Telegram and Codex. Setup binds only to loopback and needs no public webhook or port forwarding.
 
-Telegram and your configured Codex service process the messages you send. Bot chats are Telegram cloud chats. Local runtime data lives in the ignored `.local/` directory, including chat references, job state and downloads. The bot token is protected by Windows DPAPI under the Windows account that ran setup. Keep the pairing link, configuration, state, and logs private.
+Telegram and your configured Codex service process the messages you send. Bot chats are Telegram cloud chats. Local runtime data lives in the ignored `.local/` directory, including chat references, job state and downloads. The listener protects the bot token using macOS Keychain, Linux Secret Service, or Windows DPAPI. Keep the pairing link, configuration, state, and logs private.
 
 Fresh installations use a read-only coordinator and project workers with workspace-write access and on-request approvals. An explicit reply to a desktop task goes to that existing Codex chat, with its own permissions. Review a task’s project and requested action before approving it.
 
 ## Compatibility and development
 
-This independent Windows companion uses the Codex CLI app-server. Desktop Inbox integration also uses the app-tools adapter bundled with the Codex desktop app. Those interfaces can change with Codex releases. The original installation was tested with Codex CLI **0.169.1**.
+This independent companion uses the Codex CLI app-server. Auto routing, project selection, and replies to jobs started through Telegram work with the CLI. Reading a separate desktop chat or forwarding a reply to it also requires a compatible Codex desktop app-tools adapter. Windows includes optional automatic startup. The Mac and Linux guides cover manual start and stop.
 
-```powershell
+```sh
 node --test
-python -B test/silent-launcher.test.py
 ```
 
-The Windows suite exercises message routing, reply cancellation, project selection, credentials, recovery and background launch. Tests use isolated fixtures. [MIT license](LICENSE)
+Platform checks exercise the extracted release packages on Windows, macOS, and Linux. The Windows launcher suite also runs with `python -B test/silent-launcher.test.py`. The Mac and Linux checks connect to Codex CLI **0.169.1** in a fresh Codex home. [MIT license](LICENSE)

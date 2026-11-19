@@ -1,10 +1,11 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { RpcClient } from './rpc.mjs';
 import { redact } from './core.mjs';
 
-const validPipe = path => typeof path === 'string' && path.startsWith('\\\\.\\pipe\\') && path.length < 1024;
+const validPipe = path => typeof path === 'string' && path.length < 1024 &&
+  (process.platform === 'win32' ? path.startsWith('\\\\.\\pipe\\') : isAbsolute(path));
 function discoverServer() {
   const root = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'plugins', 'cache', 'openai-bundled', 'codex-app-tools');
   const versions = readdirSync(root).sort((a,b) => b.localeCompare(a, undefined, { numeric: true }));

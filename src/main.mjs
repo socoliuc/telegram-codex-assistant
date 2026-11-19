@@ -16,6 +16,7 @@ import { readLifecycleEvents } from './lifecycle.mjs';
 import { DesktopTools } from './desktop-tools.mjs';
 import { DesktopMonitor } from './desktop.mjs';
 
+if (process.platform !== 'win32') process.umask(0o077);
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const local = join(root, '.local');
 mkdirSync(local, { recursive: true });
@@ -54,7 +55,8 @@ try {
   // Stop may have raced an automatic launch before this new instance acquired its lock.
   if (stopRequested()) { await stop(); process.exit(0); }
   const config = JSON.parse(readFileSync(join(local, 'config.json'), 'utf8'));
-  const token = loadToken(join(local, 'telegram-token.dpapi'));
+  const tokenFile = join(local, process.platform === 'win32' ? 'telegram-token.dpapi' : 'telegram-token.secure');
+  const token = loadToken(tokenFile);
   telegram = new Telegram(token);
   const bot = await telegram.call('getMe');
   if (config.botId !== bot.id) throw new Error('Configured Telegram bot identity does not match its credential.');
@@ -62,7 +64,8 @@ try {
   if (webhook.url) throw new Error('This bot already has a webhook. Use a separate bot; the existing webhook was preserved.');
   const store = new StateStore(join(local, 'state.json'));
   const recovered = store.recover();
-  const loadProjects = () => discoverProjects(undefined, { executionAccess: config.executionAccess, assistantRoot: root });
+  const loadProjects = () => discoverProjects(undefined, { executionAccess: config.executionAccess,
+    assistantRoot: root, projects: config.projects });
   const projects = loadProjects();
   const pairCode = store.data.owner ? undefined : randomBytes(20).toString('hex');
   if (pairCode) writeFileSync(join(local, 'pairing.json'), JSON.stringify({ username: bot.username, code: pairCode }), { mode: 0o600 });
@@ -169,6 +172,6 @@ try {
     // A competing launch must not overwrite the running owner's health metadata.
     health({ status: 'failed', reason: 'Startup or connection failed. Run local diagnostics; credentials were not logged.' });
   }
-  console.error('Assistant could not start or lost a required connection. Run Setup.cmd or inspect local health.json.');
+  console.error('Assistant could not start or lost a required connection. Run Setup.cmd on Windows or scripts/setup.sh on macOS/Linux, then inspect local health.json.');
   process.exitCode = 1;
 }

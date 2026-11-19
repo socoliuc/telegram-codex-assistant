@@ -139,13 +139,15 @@ test('activity hook installation preserves existing hooks and is reversible with
 test('desktop endpoint refresh stays separate from activity data and bridge children cannot overwrite it',()=>{
   const dir=mkdtempSync(join(tmpdir(),'desktop-host-'));try{
     const file=join(dir,'desktop-host.json');
-    recordDesktopHost(file,'\\\\.\\pipe\\new-desktop',false);
-    recordDesktopHost(file,'\\\\.\\pipe\\stale-bridge',true);
-    assert.equal(JSON.parse(readFileSync(file,'utf8')).pipe,'\\\\.\\pipe\\new-desktop');
+    const endpoint = process.platform === 'win32' ? '\\\\.\\pipe\\new-desktop' : join(dir, 'new-desktop.sock');
+    const staleEndpoint = process.platform === 'win32' ? '\\\\.\\pipe\\stale-bridge' : join(dir, 'stale-bridge.sock');
+    recordDesktopHost(file,endpoint,false);
+    recordDesktopHost(file,staleEndpoint,true);
+    assert.equal(JSON.parse(readFileSync(file,'utf8')).pipe,endpoint);
     recordLifecycleEvent(join(dir,'events'),{hook_event_name:'Stop',session_id:'host-test',turn_id:'turn',cwd:dir});
     assert.ok(!JSON.stringify(readLifecycleEvents(join(dir,'events'))).includes('pipe'));
     recordDesktopHost(file,'https://not-a-desktop-pipe',false);
-    assert.equal(JSON.parse(readFileSync(file,'utf8')).pipe,'\\\\.\\pipe\\new-desktop');
+    assert.equal(JSON.parse(readFileSync(file,'utf8')).pipe,endpoint);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
 

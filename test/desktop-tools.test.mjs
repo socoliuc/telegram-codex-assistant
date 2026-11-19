@@ -10,7 +10,8 @@ test('concurrent desktop reads wait for MCP initialization and tool validation',
   const folder=mkdtempSync(join(tmpdir(),'desktop-mcp-'));let tools;
   try{
     const server=join(folder,'server.mjs');const host=join(folder,'host.json');
-    writeFileSync(host,JSON.stringify({pipe:'\\\\.\\pipe\\validation-only'}));
+    const pipe = process.platform === 'win32' ? '\\\\.\\pipe\\validation-only' : join(folder, 'validation.sock');
+    writeFileSync(host,JSON.stringify({pipe}));
     writeFileSync(server,`import {createInterface} from 'node:readline';
 let ready=false;const reply=(id,result,error)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,...(error?{error}:{result})})+'\\n');
 createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')setTimeout(()=>reply(m.id,{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'}}),70);

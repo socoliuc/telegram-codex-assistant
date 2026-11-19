@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, openSync, closeSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, openSync, closeSync, chmodSync, realpathSync, statSync } from 'node:fs';
+import { join, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,9 +12,10 @@ import { requireNativeExecutable } from './executables.mjs';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const local = join(root, '.local');
 mkdirSync(local, { recursive: true });
-// Hide local metadata from other standard Windows users as well as encrypting the bot token.
-const acl = spawnSync('icacls.exe', [local, '/inheritance:r', '/grant:r', `${process.env.USERDOMAIN}\\${process.env.USERNAME}:(OI)(CI)F`, 'SYSTEM:(OI)(CI)F'], { windowsHide: true, encoding: 'utf8' });
-if (acl.status !== 0) throw new Error('Could not protect the local credential directory.');
+if (process.platform === 'win32') {
+  const acl = spawnSync('icacls.exe', [local, '/inheritance:r', '/grant:r', `${process.env.USERDOMAIN}\\${process.env.USERNAME}:(OI)(CI)F`, 'SYSTEM:(OI)(CI)F'], { windowsHide: true, encoding: 'utf8' });
+  if (acl.status !== 0) throw new Error('Could not protect the local credential directory.');
+} else chmodSync(local, 0o700);
 const nonce = randomBytes(24).toString('hex');
 let port, busy = false;
 const escape = value => String(value).replace(/[&<>"']/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[x]);
@@ -34,9 +35,11 @@ function page(note = '') {
   ${paired && live ? '<p class="note">Your assistant is running and paired. Open your bot in Telegram and send /menu.</p>' : ''}
   ${live && pairing && !paired ? `<p>The bot is running. Connect your Telegram account:</p><p><a class="button" href="https://t.me/${escape(pairing.username)}?start=${escape(pairing.code)}" rel="noreferrer">Pair with @${escape(pairing.username)}</a></p><p>Open that link in Telegram and press <strong>Start</strong>. This one-time link authorizes your account. Keep it private.</p><p>Then send <code>/menu</code> to open Home. <a href="/${nonce}">Refresh connection status</a></p>` : ''}
   ${!live ? `<p>1. In Telegram, open the verified <a href="https://t.me/BotFather" rel="noreferrer">@BotFather</a>, send <code>/newbot</code> and choose a name and username.</p>
-  <p>2. Enter that bot's details below. The token stays on this computer, encrypted for your Windows account. Do not paste it into the Codex chat.</p>
+  <p>2. Enter that bot's details below. The token is stored in your operating system's secure credential store. Do not paste it into the Codex chat.</p>
   <form method="post" action="/${nonce}/connect"><label for="username">Bot username</label><input id="username" name="username" placeholder="my_codex_assistant_bot" required autocomplete="off" pattern="@?[A-Za-z0-9_]+">
-  <label for="token">Bot token from BotFather</label><input id="token" name="token" type="password" required autocomplete="off" spellcheck="false" maxlength="200"><p><button>Connect this bot</button></p></form>` : ''}
+  <label for="token">Bot token from BotFather</label><input id="token" name="token" type="password" required autocomplete="off" spellcheck="false" maxlength="200">
+  <label for="projects">Project folders (optional, one per line as name | absolute folder path)</label><textarea id="projects" name="projects" rows="5" placeholder="Website | /Users/you/Projects/website"></textarea>
+  <p><button>Connect this bot</button></p></form>` : ''}
   <p><a href="/${nonce}">Refresh connection status</a></p>
   <p><small>The assistant can read relevant Codex history and open project conversations. Open &amp; reply sends a follow-up to the conversation shown on the card. Your PC must remain awake and online. Only your paired private Telegram account can issue instructions.</small></p></main></html>`;
 }
@@ -67,14 +70,31 @@ const server = createServer(async (req, res) => {
     if (existsSync(join(local, 'state.json'))) {
       if (previousConfig.botId !== bot.id) throw new Error('This installation is already bound to another bot. Use its original credential.');
     }
-    const command = spawnSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command codex.exe -CommandType Application -ErrorAction Stop).Source'], { windowsHide: true, encoding: 'utf8' });
-    if (command.status !== 0) throw new Error('Codex CLI was not found.');
-    const codexBin = requireNativeExecutable(command.stdout.trim());
-    saveToken(join(local, 'telegram-token.dpapi'), token);
+    const command = process.platform === 'win32'
+      ? spawnSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command codex.exe -CommandType Application -ErrorAction Stop).Source'], { windowsHide: true, encoding: 'utf8' })
+      : spawnSync('/bin/sh', ['-c', 'command -v codex'], { encoding: 'utf8' });
+    if (command.status !== 0 || !command.stdout.trim()) throw new Error('Codex CLI was not found.');
+    const codexBin = requireNativeExecutable(process.platform === 'win32' ? command.stdout.trim() : realpathSync(command.stdout.trim()));
+    const projectsInput = values.get('projects')?.trim();
+    const projects = projectsInput ? projectsInput.split(/\r?\n/).map(line => {
+      const separator = line.indexOf('|');
+      if (separator < 1) throw new Error('Use one project per line in the format name | absolute folder path.');
+      const name = line.slice(0, separator).trim();
+      const folder = line.slice(separator + 1).trim();
+      if (!name || !isAbsolute(folder) || !existsSync(folder) || !statSync(folder).isDirectory())
+        throw new Error(`Project ${name || 'folder'} needs an existing absolute directory path.`);
+      return { name, root: realpathSync(folder) };
+    }) : (previousConfig.projects || []);
+    if (new Set(projects.map(project => project.root)).size !== projects.length) throw new Error('Each project folder can appear only once.');
+    const tokenFile = join(local, process.platform === 'win32' ? 'telegram-token.dpapi' : 'telegram-token.secure');
+    saveToken(tokenFile, token);
     writeFileSync(join(local, 'config.json'), JSON.stringify({ botId: bot.id, botUsername: bot.username, codexBin, nodeBin: process.execPath,
+      projects,
       ...(previousConfig.botId === bot.id && previousConfig.executionAccess === 'desktop-full-access' ? { executionAccess: previousConfig.executionAccess } : {}) }, null, 2));
     const log = openSync(join(local, 'runtime.log'), 'a');
-    const child = spawn(process.execPath, [join(root, 'src', 'main.mjs')], { cwd: root, detached: true, windowsHide: true, stdio: ['ignore', log, log] });
+    const child = process.platform === 'win32'
+      ? spawn(process.execPath, [join(root, 'src', 'main.mjs')], { cwd: root, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
+      : spawn('sh', [join(root, 'scripts', 'start.sh')], { cwd: root, detached: true, stdio: ['ignore', log, log] });
     child.unref(); closeSync(log);
     for (let i = 0; i < 15 && !existsSync(join(local, 'pairing.json')) && !running(); i++) await delay(500);
     await delay(1000);

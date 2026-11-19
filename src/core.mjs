@@ -7,17 +7,26 @@ export function isOwner(message, owner) {
 }
 
 export function rootsOverlap(a, b) {
-  const normalize = p => path.win32.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+  const implementation = process.platform === 'win32' ? path.win32 : path;
+  const normalize = p => {
+    const absolute = implementation.resolve(p);
+    const root = implementation.parse(absolute).root;
+    const resolved = absolute.length > root.length ? absolute.replace(/[\\/]+$/, '') : absolute;
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
   return a.some(x => b.some(y => {
     const left = normalize(x), right = normalize(y);
-    return left === right || left.startsWith(right + '\\') || right.startsWith(left + '\\');
+    const separator = process.platform === 'win32' ? '\\' : '/';
+    return left === right || left.startsWith(right + separator) || right.startsWith(left + separator);
   }));
 }
 
 export function isWithinRoots(folder, roots) {
   return roots.some(root => {
-    const relative = path.win32.relative(root, folder);
-    return !relative || (!path.win32.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..\\'));
+    const implementation = process.platform === 'win32' ? path.win32 : path;
+    const relative = implementation.relative(implementation.resolve(root), implementation.resolve(folder));
+    return !relative || (!implementation.isAbsolute(relative) && relative !== '..' &&
+      !relative.startsWith('..' + implementation.sep));
   });
 }
 

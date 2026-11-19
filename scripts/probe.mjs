@@ -6,9 +6,10 @@ import { RpcClient } from '../src/rpc.mjs';
 import { discoverProjects } from '../src/projects.mjs';
 import { StateStore } from '../src/state.mjs';
 import { Assistant } from '../src/assistant.mjs';
-import { saveToken, loadToken } from '../src/credentials.mjs';
+import { protectMessage, unprotectMessage } from '../src/credentials.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+if (process.platform !== 'win32') process.umask(0o077);
 const local = join(root, '.local', 'probe-' + Date.now());
 mkdirSync(local, { recursive: true });
 const rpc = new RpcClient({ cwd: root });
@@ -21,8 +22,9 @@ try {
   const threads = await rpc.call('thread/list', { limit: 3, sortKey: 'updated_at' });
   evidence.savedHistoryReadable = Array.isArray(threads.data);
   evidence.projectsDiscovered = discoverProjects().length;
-  saveToken(join(local, 'test.dpapi'), 'local-protection-roundtrip');
-  evidence.dpapiRoundTrip = loadToken(join(local, 'test.dpapi')) === 'local-protection-roundtrip';
+  const marker = 'local-protection-roundtrip';
+  evidence.credentialRoundTrip = unprotectMessage(protectMessage(marker)) === marker;
+  if (process.platform === 'win32') evidence.dpapiRoundTrip = evidence.credentialRoundTrip;
   if (evidence.inference) {
     const store = new StateStore(join(local, 'state.json'));
     store.data.owner = { userId: 1, chatId: 1 };

@@ -8,7 +8,9 @@ const validId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.t
 export function recordDesktopHost(file, pipe = process.env.CODEX_APP_TOOLS_PIPE_PATH, bridge = process.env.TELEGRAM_CODEX_BRIDGE === '1') {
   // Only the desktop-provided environment can refresh this local endpoint.
   // Bridge children may inherit an old endpoint across a desktop restart.
-  if (bridge || typeof pipe !== 'string' || !pipe.startsWith('\\\\.\\pipe\\') || pipe.length >= 1024) return;
+  const valid = typeof pipe === 'string' && pipe.length < 1024 &&
+    (process.platform === 'win32' ? pipe.startsWith('\\\\.\\pipe\\') : isAbsolute(pipe));
+  if (bridge || !valid) return;
   mkdirSync(dirname(file), { recursive: true });
   const temp = file + '.' + randomUUID() + '.tmp';
   writeFileSync(temp, JSON.stringify({ pipe, observedAt:new Date().toISOString() }), { mode:0o600 });

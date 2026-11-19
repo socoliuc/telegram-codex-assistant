@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
+
+const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 export class RpcClient extends EventEmitter {
   constructor({ command = 'codex', args = ['app-server', '--stdio'], cwd, env } = {}) {
@@ -57,7 +60,7 @@ export class RpcClient extends EventEmitter {
   reject(id, message = 'Unsupported request') { this.write({ id, error: { code: -32601, message } }); }
   async initialize() {
     const result = await this.call('initialize', {
-      clientInfo: { name: 'telegram_codex_assistant', title: 'Telegram Codex Assistant', version: '0.1.0' },
+      clientInfo: { name: 'telegram_codex_assistant', title: 'Telegram Codex Assistant', version: packageVersion },
       capabilities: { experimentalApi: true }
     });
     this.write({ method: 'initialized', params: {} });
