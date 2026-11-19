@@ -1,7 +1,7 @@
 import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isWithinRoots, redact } from './core.mjs';
+import { isWithinRoots, pathKey, redact } from './core.mjs';
 import { imageExtension } from './telegram.mjs';
 
 export function imageReferences(text) {
@@ -83,7 +83,7 @@ export async function prepareImages(text, roots, { maxBytes = 20 * 1024 * 1024, 
       if (!canonicalRoots.length) throw new Error('No source root');
       const candidate = localPath(ref.source, canonicalRoots[0]);
       if (privateFolder(candidate)) throw new Error('Private folder');
-      const canonical = await realpath(candidate), key = canonical.toLowerCase();
+      const canonical = await realpath(candidate), key = pathKey(canonical);
       if (privateFolder(canonical) || !isWithinRoots(canonical, canonicalRoots) || (current && !isWithinRoots(canonical, current)))
         throw new Error('Outside source roots');
       if (seen.has(key)) { replacements.push(ref); continue; }

@@ -1,9 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, linkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
 
 const service = 'org.telegram-codex-assistant';
+const installRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const localDirectory = join(installRoot, '.local');
+const messageKeyReference = join(localDirectory, 'message-encryption-key.ref');
 
 function run(command, args, input) {
   const result = spawnSync(command, args, {
@@ -102,19 +106,35 @@ function run(argv) {
 }
 
 function getKey(create) {
-  const account = `message-encryption-key-${accountFor(fileURLToPath(new URL('../', import.meta.url)))}`;
-  try { return Buffer.from(keychainGet(account), 'hex'); }
-  catch (error) {
-    const missing = process.platform === 'darwin'
-      ? /lookup failed -25300/.test(error.stderr || '')
-      : process.platform === 'linux' && error.status === 1 && !error.stderr;
-    if (!missing || !create) throw new Error('The message encryption key is missing or unavailable.');
-    const key = randomBytes(32);
-    try { keychainSet(account, key.toString('hex'), false); }
-    catch (writeError) {
-      if (!/write failed -25299/.test(writeError.stderr || '')) throw writeError;
+  try {
+    const reference = readFileSync(messageKeyReference, 'utf8').trim();
+    if (!/^[0-9a-f]{32}$/.test(reference)) throw new Error('The message encryption key reference is invalid.');
+    return Buffer.from(keychainGet(`message-encryption-key-${reference}`), 'hex');
+  } catch (error) {
+    if (error.code !== 'ENOENT' || !create) throw new Error('The message encryption key is missing or unavailable.');
+  }
+
+  mkdirSync(localDirectory, { recursive: true, mode: 0o700 });
+  const reference = randomBytes(16).toString('hex');
+  const key = randomBytes(32);
+  const account = `message-encryption-key-${reference}`;
+  const temporaryReference = join(localDirectory, `message-key-${reference}.tmp`);
+  keychainSet(account, key.toString('hex'));
+  try {
+    writeFileSync(temporaryReference, reference, { flag: 'wx', mode: 0o600 });
+    try {
+      // Hard-linking publishes a complete reference atomically without replacing a winner.
+      linkSync(temporaryReference, messageKeyReference);
+      return key;
+    } catch (publishError) {
+      if (publishError.code !== 'EEXIST') throw publishError;
+      keychainDelete(account);
+      const winner = readFileSync(messageKeyReference, 'utf8').trim();
+      if (!/^[0-9a-f]{32}$/.test(winner)) throw new Error('The message encryption key reference is invalid.');
+      return Buffer.from(keychainGet(`message-encryption-key-${winner}`), 'hex');
     }
-    return Buffer.from(keychainGet(account), 'hex');
+  } finally {
+    try { unlinkSync(temporaryReference); } catch (cleanupError) { if (cleanupError.code !== 'ENOENT') throw cleanupError; }
   }
 }
 

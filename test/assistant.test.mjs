@@ -3,9 +3,15 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { StateStore } from '../src/state.mjs';
 import { Assistant } from '../src/assistant.mjs';
+
+const projectRoot = process.platform === 'win32' ? 'D:\\Projects' : '/tmp/Projects';
+const projectA = join(projectRoot, 'a');
+const projectB = process.platform === 'win32' ? 'E:\\other' : '/tmp/other';
+const freshRoot = join(projectRoot, 'fresh');
+const filesystemRoot = parse(projectRoot).root;
 
 // Fake only the external Codex/Telegram boundary; state and dispatch logic are real.
 class NativeFixture extends EventEmitter {
@@ -18,7 +24,7 @@ class NativeFixture extends EventEmitter {
     if (method === 'thread/fork') return { thread: { id: 'bridge-fork-' + this.calls.length }, ...policy };
     if (method === 'thread/resume') return { thread: { id: params.threadId }, ...policy };
     if (method === 'turn/start') return { turn: { id: 'turn-' + this.calls.length } };
-    if (method === 'thread/read') return { thread: { id: params.threadId, cwd: 'D:\\Projects\\a' } };
+    if (method === 'thread/read') return { thread: { id: params.threadId, cwd: projectA } };
     return {};
   }
   respond(id, result) { this.calls.push({ responseId: id, result }); }
@@ -34,9 +40,9 @@ function fixture(options = {}) {
     sent.push({ chat, text, keyboard }); return [{ message_id: sent.length }];
   }, async call(method, params) { telegramCalls.push({ method, params }); return true; } };
   const projects = [
-    { id: 'a', name: 'A', roots: ['D:\\Projects\\a'] },
-    { id: 'parent', name: 'All projects', roots: ['D:\\Projects'] },
-    { id: 'b', name: 'B', roots: ['E:\\other'] }
+    { id: 'a', name: 'A', roots: [projectA] },
+    { id: 'parent', name: 'All projects', roots: [projectRoot] },
+    { id: 'b', name: 'B', roots: [projectB] }
   ];
   const assistant = new Assistant({ rpc, telegram, store, projects, workspace: dir, ...options });
   assistant.classifyMessage = async () => ({ projectId: null });
@@ -231,7 +237,7 @@ test('approval button is owner-bound, one-use and never grants session-wide acce
   try {
     const job = await f.assistant.dispatch('A', 'Inspect');
     await f.assistant.onRequest({ id: 77, method: 'item/commandExecution/requestApproval', params: {
-      threadId: job.threadId, turnId: job.turnId, command: 'Read project file', cwd: 'D:\\Projects\\a'
+      threadId: job.threadId, turnId: job.turnId, command: 'Read project file', cwd: projectA
     } });
     const data = f.sent.at(-1).keyboard.inline_keyboard[0][0].callback_data;
     const base = { id: 'callback', data, message: { chat: { id: 1, type: 'private' } } };
@@ -286,7 +292,7 @@ test('file permission escalation without a fully reviewed diff is declined', asy
   try {
     const job = await f.assistant.dispatch('A', 'Inspect');
     await f.assistant.onRequest({ id: 99, method: 'item/fileChange/requestApproval', params: {
-      threadId: job.threadId, turnId: job.turnId, itemId: 'patch-1', grantRoot: 'D:\\', reason: 'Allow patch'
+      threadId: job.threadId, turnId: job.turnId, itemId: 'patch-1', grantRoot: filesystemRoot, reason: 'Allow patch'
     } });
     assert.deepEqual(f.rpc.calls.find(c => c.responseId === 99).result, { decision: 'decline' });
     assert.ok(f.sent.every(m => !m.keyboard));
@@ -369,7 +375,7 @@ test('owner instructions refresh context and send a timestamped data snapshot to
   const f = fixture();
   try {
     let refreshed = 0;
-    f.assistant.context = { projects: [{ id: 'fresh', name: 'Latest project', roots: ['F:\\fresh'] }], async refresh() {
+    f.assistant.context = { projects: [{ id: 'fresh', name: 'Latest project', roots: [freshRoot] }], async refresh() {
       refreshed++;
       return { status: 'fresh', observedAt: '2026-10-24T00:00:00Z', recent: [{ name: 'Latest saved task' }] };
     } };
@@ -405,7 +411,7 @@ test('registered child projects do not authorize reading parent workspace chats'
   const f = fixture();
   try {
     f.assistant.projects = [f.assistant.projects[0]];
-    f.rpc.call = async () => ({ thread: { cwd: 'D:\\Projects' } });
+    f.rpc.call = async () => ({ thread: { cwd: projectRoot } });
     await assert.rejects(f.assistant.readChat('parent-workspace'), /outside registered/);
   } finally { f.cleanup(); }
 });
@@ -588,7 +594,7 @@ test('expired and removed project buttons never select or start work', async () 
     f.assistant.projects = [];
     await f.assistant.handleUpdate(choose(data, 101));
     assert.ok(!f.store.data.selectedProjectId);
-    f.assistant.projects = [{ id: 'a', name: 'A', roots: ['D:\\Projects\\a'] }];
+    f.assistant.projects = [{ id: 'a', name: 'A', roots: [projectA] }];
     await f.assistant.handleUpdate(message('/project', 102));
     const picker = f.telegramCalls.filter(c => c.method === 'editMessageText').at(-1).params;
     const expired = picker.reply_markup.inline_keyboard.flat().find(b => b.text === 'A').callback_data;
@@ -623,8 +629,8 @@ test('selected project receives only its own automatic context and cannot dispat
   try {
     f.assistant.context = { projects: f.assistant.projects, async refresh() { return {
       status: 'fresh', projects: f.assistant.projects,
-      recent: [{ name: 'A history', cwd: 'D:\\Projects\\a' }, { name: 'B private history', cwd: 'E:\\other' }],
-      signals: [{ project: 'A', cwd: 'D:\\Projects\\a' }, { project: 'B', cwd: 'E:\\other' }]
+      recent: [{ name: 'A history', cwd: projectA }, { name: 'B private history', cwd: projectB }],
+      signals: [{ project: 'A', cwd: projectA }, { project: 'B', cwd: projectB }]
     }; } };
     const job = await f.assistant.coordinate('What changed?', 'a');
     const prompt = f.rpc.calls.find(c => c.method === 'turn/start').params.input[0].text;
@@ -632,7 +638,7 @@ test('selected project receives only its own automatic context and cannot dispat
     await f.assistant.onRequest({ id: 901, method: 'item/tool/call', params: { threadId: job.threadId, tool: 'dispatch_project', arguments: { project: 'B', prompt: 'Change B' } } });
     assert.equal(f.rpc.calls.at(-1).result.success, false);
     assert.equal(Object.keys(f.store.data.workers).length, 0);
-    f.rpc.call = async () => ({ thread: { cwd: 'E:\\other' } });
+    f.rpc.call = async () => ({ thread: { cwd: projectB } });
     await assert.rejects(f.assistant.readChat('b-history', 'a'), /outside/);
   } finally { f.cleanup(); }
 });
@@ -714,7 +720,7 @@ test('explicit desktop access applies the authorized permissions to coordinator 
       assert.equal(params.config.web_search, 'live');
       assert.ok(!params.developerInstructions.includes('Do not change global Codex configuration or the Telegram bridge'));
     }
-    assert.equal(sessions[1].params.cwd, 'D:\\Projects\\a');
+    assert.equal(sessions[1].params.cwd, projectA);
   } finally { f.cleanup(); }
 });
 
@@ -739,7 +745,7 @@ test('full-access direct work reserves roots while allowing its own authorized w
   const f = fixture({ executionAccess: 'desktop-full-access' });
   try {
     const parent = await f.assistant.coordinate('Inspect project A', 'a');
-    assert.deepEqual(parent.roots, ['D:\\Projects\\a']);
+    assert.deepEqual(parent.roots, [projectA]);
     assert.deepEqual(parent.imageRoots, parent.roots);
     await assert.rejects(f.assistant.dispatch('A', 'Unrelated task'), /busy|overlap/);
     await f.assistant.onRequest({ id: 801, method: 'item/tool/call', params: {
@@ -815,7 +821,7 @@ test('selected full-access coordinator can interrupt its own direct task', async
 test('a follow-up waits for an active control turn before restoring full write permissions', async () => {
   const f = fixture({ executionAccess: 'desktop-full-access' });
   try {
-    f.store.data.jobs.busy = { id: 'busy', roots: ['D:\\Projects\\a'], status: 'running' };
+    f.store.data.jobs.busy = { id: 'busy', roots: [projectA], status: 'running' };
     const control = await f.assistant.coordinate('What is happening?', 'a');
     assert.equal(control.executionMode, 'read-only-control');
     f.store.data.jobs.busy.status = 'completed';
@@ -826,7 +832,7 @@ test('a follow-up waits for an active control turn before restoring full write p
     f.rpc.emit('notification', { method: 'turn/completed', params: { threadId: control.threadId,
       turn: { id: control.turnId, status: 'completed' } } });
     const next = await followup;
-    assert.deepEqual(next.roots, ['D:\\Projects\\a']);
+    assert.deepEqual(next.roots, [projectA]);
     assert.equal(next.executionMode, undefined);
     assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').at(-1).params.sandboxPolicy.type, 'dangerFullAccess');
   } finally { f.cleanup(); }
@@ -843,7 +849,7 @@ test('a selected project waits for an overlapping General reply instead of losin
       turn: { id: general.turnId, status: 'completed' } } });
     const next = await selected;
     assert.equal(next.scopeProjectId, 'a');
-    assert.deepEqual(next.roots, ['D:\\Projects\\a']);
+    assert.deepEqual(next.roots, [projectA]);
     assert.equal(next.executionMode, undefined);
     const turns = f.rpc.calls.filter(c => c.method === 'turn/start');
     assert.equal(turns.length, 2);
@@ -886,7 +892,7 @@ test('own delegation never skips an older uncertain coordinator job on the same 
   const f = fixture({ executionAccess: 'desktop-full-access' });
   try {
     const threadId = await f.assistant.ensureCoordinator('a');
-    f.store.data.jobs.older = { id: 'older', threadId, roots: ['D:\\Projects\\a'], status: 'uncertain' };
+    f.store.data.jobs.older = { id: 'older', threadId, roots: [projectA], status: 'uncertain' };
     const control = await f.assistant.coordinate('Inspect what happened', 'a');
     await f.assistant.onRequest({ id: 804, method: 'item/tool/call', params: {
       threadId: control.threadId, tool: 'dispatch_project', arguments: { project: 'A', prompt: 'Do it again' }

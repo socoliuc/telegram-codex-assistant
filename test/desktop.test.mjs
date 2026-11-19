@@ -6,6 +6,10 @@ import { tmpdir } from 'node:os';
 import { StateStore } from '../src/state.mjs';
 import { DesktopMonitor } from '../src/desktop.mjs';
 
+const projectA = process.platform === 'win32' ? 'D:\\a' : '/tmp/tg-desktop-projects/a';
+const projectB = process.platform === 'win32' ? 'D:\\b' : '/tmp/tg-desktop-projects/b';
+const listenerLocal = process.platform === 'win32' ? 'D:\\assistant\\.local' : '/tmp/tg-assistant/.local';
+
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'desktop-alert-'));
   const store = new StateStore(join(dir,'state.json')); store.data.owner={userId:1,chatId:1};
@@ -15,8 +19,8 @@ function fixture() {
     async read(id){return structuredClone(histories.get(id));}, async send(id,text,hostId){submitted.push({id,text,hostId});return {status:'sent'};} };
   const send=async(text,jobId,keyboard,onDelivered)=>{const message={message_id:sent.length+1};sent.push({text,message});onDelivered?.(message);return [message];};
   const monitor=new DesktopMonitor({tools,store,send,loadProjects:()=>[
-    {id:'a',name:'A',roots:['D:\\a']},{id:'b',name:'B',roots:['D:\\b']}],loadEvents:()=>[],excludeThreadIds:()=>[],minimumScanMs:0});
-  const put=(id,project,turn,status='completed',text='Finished')=>histories.set(id,{thread:{id,title:`Task ${id}`,cwd:`D:\\${project}`,updatedAt:Date.now(),status:{type:status==='inProgress'?'active':'idle'}},turns:[{
+    {id:'a',name:'A',roots:[projectA]},{id:'b',name:'B',roots:[projectB]}],loadEvents:()=>[],excludeThreadIds:()=>[],minimumScanMs:0});
+  const put=(id,project,turn,status='completed',text='Finished')=>histories.set(id,{thread:{id,title:`Task ${id}`,cwd:project === 'a' ? projectA : projectB,updatedAt:Date.now(),status:{type:status==='inProgress'?'active':'idle'}},turns:[{
     id:turn,status,startedAt:Date.now()/1000+1,completedAt:status==='completed'?Date.now()/1000+2:null,
     items:[{type:'agentMessage',id:'item-'+turn,phase:'final_answer',text}]}]});
   return {dir,store,histories,sent,submitted,tools,monitor,put,cleanup(){rmSync(dir,{recursive:true,force:true});}};
@@ -206,9 +210,9 @@ test('answering one question cannot hide remaining structured or flattened promp
 
 test('private listener validation folders are excluded without hiding real project conversations', async () => {
   const f = fixture(); try {
-    f.monitor.excludeRoots = ['D:\\assistant\\.local'];
+    f.monitor.excludeRoots = [listenerLocal];
     f.put('test-run', 'a', 'test-turn');
-    f.histories.get('test-run').thread.cwd = 'D:\\assistant\\.local\\image-smoke-123';
+    f.histories.get('test-run').thread.cwd = join(listenerLocal, 'image-smoke-123');
     f.put('real-project', 'b', 'real-turn');
     await f.monitor.scan();
     assert.equal(f.sent.length, 1);

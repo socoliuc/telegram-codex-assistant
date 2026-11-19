@@ -11,6 +11,7 @@ import { requireNativeExecutable } from './executables.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const local = join(root, '.local');
+if (process.platform !== 'win32') process.umask(0o077);
 mkdirSync(local, { recursive: true });
 if (process.platform === 'win32') {
   const acl = spawnSync('icacls.exe', [local, '/inheritance:r', '/grant:r', `${process.env.USERDOMAIN}\\${process.env.USERNAME}:(OI)(CI)F`, 'SYSTEM:(OI)(CI)F'], { windowsHide: true, encoding: 'utf8' });

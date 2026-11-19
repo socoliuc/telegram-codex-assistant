@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverProjects, projectForChat } from '../src/projects.mjs';
 
 test('authorized desktop access exposes the real assistant source without editing desktop project state', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'telegram-projects-'));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'telegram-projects-')));
   try {
     const source = join(dir, 'assistant'); mkdirSync(source);
     const options = { executionAccess: 'desktop-full-access', assistantRoot: source };
@@ -25,7 +25,7 @@ test('authorized desktop access exposes the real assistant source without editin
 });
 
 test('configured local roots provide project routing without desktop project discovery', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'telegram-local-projects-'));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'telegram-local-projects-')));
   try {
     const alpha = join(dir, 'alpha'); mkdirSync(alpha);
     const nested = join(alpha, 'nested'); mkdirSync(nested);

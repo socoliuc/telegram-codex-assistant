@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync, existsSync, statSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
-import { isWithinRoots } from './core.mjs';
+import { isWithinRoots, pathKey } from './core.mjs';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 
@@ -29,15 +29,14 @@ export function discoverProjects(codexHome = process.env.CODEX_HOME || join(home
         typeof entry.root !== 'string' || !isAbsolute(entry.root)) continue;
     try { if (!statSync(entry.root).isDirectory()) continue; } catch { continue; }
     const root = realpathSync(entry.root);
-    const sameRoot = projects.find(project => project.roots.some(existing =>
-      process.platform === 'win32' ? existing.toLowerCase() === root.toLowerCase() : existing === root));
+    const sameRoot = projects.find(project => project.roots.some(existing => pathKey(existing) === pathKey(root)));
     if (sameRoot) continue;
     const id = 'local-' + createHash('sha256').update(root).digest('hex').slice(0, 16);
     projects.push({ id, name: entry.name.trim(), roots: [root] });
   }
   if (options.executionAccess === 'desktop-full-access' && options.assistantRoot && existsSync(options.assistantRoot)) {
     const root = realpathSync(options.assistantRoot);
-    if (!projects.some(p => p.roots.some(r => r.toLowerCase() === root.toLowerCase())))
+    if (!projects.some(p => p.roots.some(r => pathKey(r) === pathKey(root))))
       projects.push({ id: 'telegram-codex-assistant-local', name: 'Telegram Codex Assistant', roots: [root] });
   }
   return projects;

@@ -7,6 +7,9 @@ import { DesktopTools } from '../src/desktop-tools.mjs';
 import { DesktopMonitor } from '../src/desktop.mjs';
 import { StateStore } from '../src/state.mjs';
 
+const projectA = process.platform === 'win32' ? 'D:\\a' : join(tmpdir(), 'tg-desktop-projects', 'a');
+const privateRoot = process.platform === 'win32' ? 'D:\\private' : join(tmpdir(), 'tg-private');
+
 function fixture(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'desktop-polling-'));
   const store = new StateStore(join(dir, 'state.json'));
@@ -31,7 +34,7 @@ function fixture(options = {}) {
     now: () => time, minimumScanMs: 0, ...options });
   monitor.inbox.now = () => time;
   const put = (id, status = 'inProgress') => {
-    const h = { thread: { id, title: id, cwd: 'D:\\a', updatedAt: time / 1000,
+    const h = { thread: { id, title: id, cwd: projectA, updatedAt: time / 1000,
       status: { type: status === 'inProgress' ? 'active' : 'idle', activeFlags: [] } },
       turns: [{ id: 'turn-' + id, status, startedAt: time / 1000, items: [] }] };
     histories.set(id, h); return h;
@@ -294,8 +297,8 @@ test('an expired ephemeral hook is consumed without treating a real chat as unav
 });
 
 test('stable private validation chats cannot exhaust the read budget on every scan', async () => {
-  const f = fixture({ excludeRoots: ['D:\\private'] }); try {
-    for (let i = 0; i < 4; i++) f.put('private-' + i).thread.cwd = 'D:\\private\\probe-' + i;
+  const f = fixture({ excludeRoots: [privateRoot] }); try {
+    for (let i = 0; i < 4; i++) f.put('private-' + i).thread.cwd = join(privateRoot, 'probe-' + i);
     f.put('real');
     f.tools.list = async () => [...f.histories.values()].map(h => ({ id: h.thread.id, updatedAt: h.thread.updatedAt, status: h.thread.status.type }));
     await f.monitor.scan(); await f.monitor.scan();

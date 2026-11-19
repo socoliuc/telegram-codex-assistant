@@ -37,3 +37,7 @@ To change folders later, stop the listener and edit only the `projects` property
 Send **/menu** and verify the destination shows **Auto**. A general question should go to General. A request naming a registered project should go to that project. In a CLI-only session, Telegram can follow jobs it starts. For an existing desktop chat, **/connection** reports whether a compatible desktop adapter is available.
 
 Keep the installation folder, keyring, and Codex login together under the same user account. The installation path identifies its saved bot credential. If you move to another computer, use setup there and stop the previous listener before pairing the same bot. [Back to the project page](../README.md)
+
+### Optional desktop hooks
+
+If your Codex desktop installation includes the app-tools adapter, run `node scripts/install-hooks.mjs` from the extracted folder, review the new hooks in Codex, and start a desktop turn. Check **/connection** for the result. Run `node scripts/install-hooks.mjs --remove` to remove the hooks that belong to this installation.

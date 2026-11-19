@@ -11,6 +11,11 @@ import { Inbox } from '../src/inbox.mjs';
 import { Telegram } from '../src/telegram.mjs';
 import { DesktopTools } from '../src/desktop-tools.mjs';
 
+const projectRoot = process.platform === 'win32' ? 'D:\\' : '/';
+const projectA = process.platform === 'win32' ? 'D:\\a' : '/tmp/tg-projects/a';
+const projectB = process.platform === 'win32' ? 'D:\\b' : '/tmp/tg-projects/b';
+const unrelatedRoot = process.platform === 'win32' ? 'E:\\unrelated-folder-with-a-long-name' : '/tmp/unrelated-folder-with-a-long-name';
+
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'tg-controls-'));
   const store = new StateStore(join(dir, 'state.json'));
@@ -26,7 +31,7 @@ function fixture() {
       const message = { message_id: sent.length + 1, chat: { id: 1, type: 'private' } };
       sent.push({ text, keyboard, message, options }); onDelivered?.(message); return [message];
     } };
-  const projects = [{ id: 'a', name: 'Project A', roots: ['D:\\a'] }, { id: 'b', name: 'Project B', roots: ['D:\\b'] }];
+  const projects = [{ id: 'a', name: 'Project A', roots: [projectA] }, { id: 'b', name: 'Project B', roots: [projectB] }];
   const assistant = new Assistant({ store, telegram, rpc, projects, workspace: dir });
   assistant.classifyMessage = async () => ({ projectId: null });
   const inbox = assistant.controls.inbox; inbox.now = () => clock;
@@ -38,7 +43,7 @@ function fixture() {
   assistant.desktop = monitor;
   const put = (id, kind = 'completion') => {
     const question = kind === 'input';
-    const h = { thread: { id, title: 'Task ' + id, cwd: 'D:\\a', hostId: 'local', updatedAt: clock, status: { type: question ? 'active' : 'idle' } },
+    const h = { thread: { id, title: 'Task ' + id, cwd: projectA, hostId: 'local', updatedAt: clock, status: { type: question ? 'active' : 'idle' } },
       turns: [{ id: 'turn-' + id, status: question ? 'inProgress' : 'completed', startedAt: Date.now() / 1000 + 1,
         items: [{ type: 'agentMessage', id: question ? 'call_' + id : 'msg_' + id, phase: 'final_answer', text: question ? 'Which color?' : 'Finished the requested work.' }] }] };
     histories.set(id, h); return h;
@@ -56,21 +61,21 @@ const answerButtons = message => message.keyboard.inline_keyboard.flat().filter(
 
 test('a shared parent folder cannot steal a child project title, including on existing inbox cards', async () => {
   const f = fixture(); try {
-    const parent = { id: 'parent', name: 'Shopping', roots: ['D:\\', 'E:\\unrelated-folder-with-a-long-name'] };
+    const parent = { id: 'parent', name: 'Shopping', roots: [projectRoot, unrelatedRoot] };
     f.assistant.projects.unshift(parent);
     f.put('launch'); await f.scan();
     assert.match(f.sent[0].text, /^Project A · Update/);
     const old = f.inbox.list('updates')[0];
     old.label = old.route.label = 'Shopping · Task launch';
     delete old.route.origin;
-    old.route.projectId = 'parent'; old.route.imageRoots = ['D:\\a', ...parent.roots];
+    old.route.projectId = 'parent'; old.route.imageRoots = [projectA, ...parent.roots];
     old.text = old.label + ' — has an update\n\nThe launch finished.\n\nReply here to continue.';
     old.imageSource = ''; old.route.context = '';
     await f.say('/updates'); const text = f.sent.at(-1).text;
     assert.match(text, /Project A · Update/); assert.match(text, /The launch finished/); assert.doesNotMatch(text, /Shopping/);
     assert.equal(old.route.threadId, 'launch'); assert.equal(old.route.projectId, 'parent');
-    assert.deepEqual(f.assistant.controls.forDisplay(old).allowedImageRoots, ['D:\\a']);
-    old.verifiedOrigin = { cwd: 'D:\\a', projectId: 'parent' };
+    assert.deepEqual(f.assistant.controls.forDisplay(old).allowedImageRoots, [projectA]);
+    old.verifiedOrigin = { cwd: projectA, projectId: 'parent' };
     assert.match(f.assistant.controls.forDisplay(old).displayLabel, /^Shopping ·/);
   } finally { f.cleanup(); }
 });
@@ -1910,7 +1915,7 @@ test('questions observed in old running turns remain pending after completion an
 
 test('a reply to a failure without a conversation cannot submit work to General', async () => {
   const f = fixture(); try {
-    f.store.data.jobs.reservation = { id: 'reservation', project: 'A', status: 'failed', roots: ['D:\\a'] };
+    f.store.data.jobs.reservation = { id: 'reservation', project: 'A', status: 'failed', roots: [projectA] };
     f.assistant.controls.syncJobs(); const item = f.inbox.list()[0];
     await f.assistant.controls.item(item.id);
     assert.equal(f.sent.at(-1).keyboard.inline_keyboard[0][0].text, 'Details');

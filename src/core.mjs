@@ -1,5 +1,10 @@
 import path from 'node:path';
 
+export function pathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 export function isOwner(message, owner) {
   return Boolean(owner && message?.chat?.type === 'private' && !message?.from?.is_bot &&
     !message.forward_origin && !message.forward_from && !message.sender_chat &&
@@ -7,26 +12,13 @@ export function isOwner(message, owner) {
 }
 
 export function rootsOverlap(a, b) {
-  const implementation = process.platform === 'win32' ? path.win32 : path;
-  const normalize = p => {
-    const absolute = implementation.resolve(p);
-    const root = implementation.parse(absolute).root;
-    const resolved = absolute.length > root.length ? absolute.replace(/[\\/]+$/, '') : absolute;
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  return a.some(x => b.some(y => {
-    const left = normalize(x), right = normalize(y);
-    const separator = process.platform === 'win32' ? '\\' : '/';
-    return left === right || left.startsWith(right + separator) || right.startsWith(left + separator);
-  }));
+  return a.some(folder => isWithinRoots(folder, b)) || b.some(folder => isWithinRoots(folder, a));
 }
 
 export function isWithinRoots(folder, roots) {
   return roots.some(root => {
-    const implementation = process.platform === 'win32' ? path.win32 : path;
-    const relative = implementation.relative(implementation.resolve(root), implementation.resolve(folder));
-    return !relative || (!implementation.isAbsolute(relative) && relative !== '..' &&
-      !relative.startsWith('..' + implementation.sep));
+    const relative = path.relative(root, folder);
+    return !relative || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
   });
 }
 

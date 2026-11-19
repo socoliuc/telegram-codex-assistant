@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, renameSync, readFileSync, readdirSync, unlinkSync, realpathSync } from 'node:fs';
+import { mkdirSync, chmodSync, writeFileSync, renameSync, readFileSync, readdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { join, isAbsolute, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { verifiedDesktopSubmission } from './presence-provenance.mjs';
@@ -41,7 +41,8 @@ export function recordLifecycleEvent(folder, input, { bridge = process.env.TELEG
   const event = { id: randomUUID(), event: input.hook_event_name, sessionId: input.session_id,
     turnId: validId(input.turn_id) ? input.turn_id : null, cwd, receivedAt: new Date().toISOString(),
     ...(input.hook_event_name === 'UserPromptSubmit' ? promptOrigin(input, bridge) : {}) };
-  mkdirSync(folder, { recursive: true });
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(folder, 0o700);
   const file = join(folder, `${Date.now()}-${event.id}.json`);
   const temp = file + '.tmp';
   writeFileSync(temp, JSON.stringify(event), { mode: 0o600 });
