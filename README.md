@@ -50,6 +50,15 @@ Fresh installations use a read-only coordinator and project workers with workspa
 
 ## Compatibility and development
 
+| Platform | Verified OS versions and architectures |
+| --- | --- |
+| Windows | Windows 11 x64 (26H2, live Telegram test) and Windows Server 2025 x64 (automated package tests) |
+| macOS | macOS 15 Sequoia on Apple Silicon (arm64) and Intel (x64) |
+| Linux | Ubuntu 26.04 LTS x64 with an unlocked Secret Service keyring |
+
+This table records the environments verified for v0.2.0. Compatibility with older OS releases, other Linux distributions and additional architectures is unverified.
+
+
 This independent companion uses the Codex CLI app-server. Auto routing, project selection, and replies to jobs started through Telegram work with the CLI. Reading a separate desktop chat or forwarding a reply to it also requires a compatible Codex desktop app-tools adapter. Windows includes optional automatic startup. The Mac and Linux guides cover manual start and stop.
 
 ```sh
