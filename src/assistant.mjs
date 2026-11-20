@@ -132,7 +132,9 @@ export class Assistant {
     const record = message => {
       if (delivered.has(message.message_id)) return;
       delivered.add(message.message_id);
-      if (jobId) { this.store.data.replies[String(message.message_id)] = jobId; this.store.save(); }
+      this.controls.history.record(message);
+      if (jobId) this.store.data.replies[String(message.message_id)] = jobId;
+      this.store.save();
       onDelivered?.(message);
     };
     const messages = await this.telegram.send(this.store.data.owner.chatId, redact(text, [this.telegram.token]), keyboard, record, options);
@@ -753,6 +755,8 @@ export class Assistant {
       return;
     }
     if (!isOwner(m, this.store.data.owner)) return;
+    this.controls.history.record(m);
+    this.store.save();
     const image = telegramImage(m);
     if (image) text = m.caption?.trim() || 'Describe this image and read any visible text. If it refers to our current task, explain what you can observe.';
     if (!text) { await this.controls.help('You can send me text, a photo, or a JPEG/PNG/WebP image up to 20 MB. I can’t read voice notes or other files yet.'); return; }

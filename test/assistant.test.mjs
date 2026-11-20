@@ -116,7 +116,7 @@ test('browse a Codex project, preview its exact chat, then send there until leav
     assert.equal(f.store.data.activeChat, undefined);
     assert.equal(f.store.data.generalDestination, true);
     assert.ok(!f.assistant.controls.housekeeping.records['90'].dismissedAt);
-    await click(/^Clear recent bot panels and notices · \d+$/);
+    await click(/^Clear bot panels & notices · \d+$/);
     assert.ok(f.assistant.controls.housekeeping.records['90'].dismissedAt);
     assert.ok(!f.assistant.controls.housekeeping.records['91'].dismissedAt);
     f.assistant.classifyMessage = async () => { assert.fail('General should bypass Auto'); };
@@ -635,7 +635,7 @@ test('native project picker switches context without creating or starting any Co
     assert.ok(!f.store.data.selectedProjectId);
     await f.assistant.handleUpdate(choose(selection, 102));
     assert.equal(f.store.data.selectedProjectId, 'a');
-    assert.match(f.store.data.inbox.panels['1'].signature, /Current project: A/);
+    assert.match(f.store.data.inbox.panels['1'].signature, /Send to: A/);
     assert.equal(f.sent.length, 1, 'selection updates the picker message');
     assert.equal(new StateStore(f.store.file).data.selectedProjectId, 'a');
     assert.equal(f.rpc.calls.length, 0);

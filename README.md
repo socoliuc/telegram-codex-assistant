@@ -42,7 +42,7 @@ On a CLI-only installation, add your project folders to give **Auto** destinatio
 | **Open & reply** | Sends your next plain message to that card’s conversation. An explicit Telegram reply targets the message you quoted. |
 | **Connection** · `/connection` | Shows listener health, project discovery, and the freshness of the desktop connection. |
 
-Navigation, review, and background cleanup leave your messages and Codex results in Telegram. Closed or superseded cards lose their buttons. **Close** removes only the bot panel or notice you tapped, and bulk cleanup is limited to bot panels and notices.
+Navigation and review keep your messages and results visible. **Close** removes one bot panel or notice. **Clear chat** on Home asks before removing recent messages on both sides. Telegram lets the bot clear messages it has seen from the last 48 hours. Use Telegram’s **Clear History** for anything left. Your Codex chats and Inbox tasks stay available.
 
 ## Where your messages go
 

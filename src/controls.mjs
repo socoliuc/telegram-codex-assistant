@@ -5,6 +5,7 @@ import { alertBody, alertHeading, alertPreview, displayMessage, formatJobs } fro
 import { projectForChat } from './projects.mjs';
 import { randomBytes } from 'node:crypto';
 import { Housekeeping } from './housekeeping.mjs';
+import { ChatHistory } from './chat-history.mjs';
 import { ActivityGate } from './activity.mjs';
 import { questionChoices, choiceRevision } from './choices.mjs';
 import { imageReferences, prepareImages, renderAttachedImages } from './outgoing-images.mjs';
@@ -22,6 +23,7 @@ export class Controls {
     this.cleaning = new Map();
     this.panelEdits = new Map();
     this.housekeeping = new Housekeeping(this);
+    this.history = new ChatHistory(assistant.store, () => this.inbox.now());
     this.activity = new ActivityGate(this.inbox);
     this.openSerial = Promise.resolve();
   }
@@ -180,6 +182,7 @@ export class Controls {
   }
   record(item, message, metadata = {}) {
     const id = String(message.message_id);
+    this.history.record(message);
     item.notificationMessages ||= {};
     item.notificationMessages[id] ||= { sentAt: message.date ? message.date * 1000 : this.inbox.now() };
     if (metadata.forceReply) item.notificationMessages[id].forceReply = true;
@@ -354,7 +357,20 @@ export class Controls {
           updates: this.inbox.list('updates').filter(item => item.kind === 'completion').map(item => item.id)
         } };
     }
-    if (view === 'general') {
+    if (view === 'clear-chat') {
+      const targets = this.history.targets(message?.message_id);
+      const offer = { nonce: randomBytes(8).toString('hex'), ids: targets, expiresAt: this.inbox.now() + 5 * 60_000 };
+      text = targets.length
+        ? `Clear this Telegram chat?\n\nRemove up to ${targets.length} recent messages, including your messages and Codex replies. This can’t be undone. Codex chats and Inbox tasks stay.\n\nTelegram limits bots to messages they know about from the last 48 hours. Use Clear History in Telegram for anything left.`
+        : 'No recent messages to clear. Use Clear History in Telegram for older messages.';
+      rows = targets.length ? [[button('Clear messages', 'clear-confirm:' + offer.nonce)], [button('Cancel', 'home')]] : [[homeButton]];
+      const id = await this.panel(text, { inline_keyboard: rows }, message, view);
+      if (id && !this.inbox.data.panels[id]?.dismissedAt) {
+        this.inbox.data.panels[id].clearOffer = offer;
+        this.store.save();
+      }
+      return id;
+    } else if (view === 'general') {
       const recent = this.inbox.now() - 48 * 60 * 60_000;
       cleanupOffer.targets.panels = cleanupOffer.targets.panels.filter(id => this.inbox.data.panels[id]?.sentAt > recent);
       cleanupOffer.targets.chat = cleanupOffer.targets.chat.filter(id => {
@@ -363,17 +379,17 @@ export class Controls {
       });
       const count = cleanupOffer.targets.panels.length + cleanupOffer.targets.chat.length;
       text = 'General\n\nType a message to send it to General.';
-      rows = count ? [[button(`Clear recent bot panels and notices · ${count}`, 'clean:bot:' + cleanupOffer.nonce)]] : [];
+      rows = count ? [[button(`Clear bot panels & notices · ${count}`, 'clean:bot:' + cleanupOffer.nonce)]] : [];
       rows.push([button('⌂', 'home')]);
     } else if (view === 'home') {
       const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' :
         this.store.data.generalDestination ? 'General' : 'Auto');
-      text = `Home\nCurrent project: ${destination}\n\n` + (selected ? 'Type a message to work in this project.' :
-        this.store.data.selectedProjectId ? 'Choose an available project before sending a task.' :
-        this.store.data.generalDestination ? 'Type a message to send it to General.' : 'Type a message. I’ll find its project or keep it in General.');
+      text = `Home\nSend to: ${destination}\n\n` + (selected ? 'Type to message this project.' :
+        this.store.data.selectedProjectId ? 'Choose another project.' :
+        this.store.data.generalDestination ? 'Type to message General.' : 'Type a message or choose a project.');
       rows = [[button('Projects', 'browse'), button('General', 'general')],
         [button(`Inbox · ${attention.length}`, 'attention:0'), button('Updates', 'updates:0')],
-        [button('Running', 'running'), button('More', 'more')]];
+        [button('Running', 'running'), button('More', 'more')], [button('Clear chat', 'clear-chat')]];
     } else if (view === 'more') {
       text = 'More\n\nAlerts: ' + this.activity.status().label;
       rows = [[button('Routing', 'projects'), button('Alert settings', 'settings')],
@@ -473,7 +489,7 @@ export class Controls {
   age(at) { const minutes = Math.max(0, Math.floor((this.inbox.now() - at) / 60_000)); return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`; }
   async panel(text, keyboard, message, view, options = { silent: true }) {
     const rows = [...(keyboard?.inline_keyboard || [])], last = rows.at(-1);
-    if (!['browse', 'chat-list', 'chat-preview', 'chat-active', 'general', 'projects'].includes(view)) {
+    if (!['browse', 'chat-list', 'chat-preview', 'chat-active', 'general', 'projects', 'clear-chat', 'clear-result'].includes(view)) {
       const close = button('Close', 'close');
       if (last?.length < 3 && last.some(b => ['ctl:home', 'ctl:more'].includes(b.callback_data))) rows[rows.length - 1] = [...last, close];
       else rows.push([close]);
@@ -492,6 +508,7 @@ export class Controls {
         }); } catch (error) { if (error.telegramReason !== 'message-unchanged') throw error; }
       }
       if (panel.dismissedAt) return message.message_id;
+      if (view !== 'clear-chat') delete panel.clearOffer;
       Object.assign(panel, { signature, view, projectId: this.store.data.selectedProjectId || 'general',
         expiresAt: this.inbox.now() + 24 * 60 * 60_000 }); this.store.save();
       return message.message_id;
@@ -554,6 +571,7 @@ export class Controls {
     const action = String(q.data).slice(4), [verb, value] = action.split(':');
     if (verb === 'answer') return this.answer(q, action);
     if (verb === 'clean') return this.runCleanup(q, value, action.split(':')[2]);
+    if (verb === 'clear-confirm') return this.confirmClearChat(q, value);
     if (action === 'home') {
       const selected = this.clearReplyDestination();
       this.acknowledge(q);
@@ -617,6 +635,23 @@ export class Controls {
       this.store.save(); return this.open('settings', q.message);
     }
     return this.open(action, q.message);
+  }
+  async confirmClearChat(q, nonce) {
+    const id = String(q.message?.message_id);
+    const panel = this.inbox.data.panels[id], offer = panel?.clearOffer;
+    if (!panel || panel.dismissedAt || panel.view !== 'clear-chat' || this.inbox.data.homePanelId !== id ||
+        !offer || offer.nonce !== nonce || offer.expiresAt <= this.inbox.now()) {
+      return this.confirm(q, 'That confirmation expired. Open Clear chat again.');
+    }
+    this.acknowledge(q);
+    delete panel.clearOffer;
+    this.clearReplyDestination();
+    this.store.save();
+    const { accepted, remaining } = await this.history.clear(offer.ids.filter(target => target !== id), this.a.telegram);
+    const result = remaining ? `Telegram accepted cleanup for ${accepted} of ${accepted + remaining} messages. Open Clear chat to try again.` :
+      'Recent messages cleared.';
+    return this.panel(result + '\n\nFor older messages, use Clear History in Telegram.',
+      { inline_keyboard: [[button('⌂ Home', 'home')]] }, q.message, 'clear-result');
   }
   choiceMessages(item) {
     return notificationIds(this, item)

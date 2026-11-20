@@ -1299,6 +1299,68 @@ test('navigation and automatic housekeeping preserve sent messages and delivered
   } finally { f.cleanup(); }
 });
 
+test('Clear chat asks first and deletes only the confirmed recent messages in the paired chat', async () => {
+  const f = fixture(); try {
+    await f.say('/menu');
+    const home = f.sent.at(-1).message;
+    const buttons = () => JSON.parse(f.inbox.data.panels[home.message_id].signature)[1].inline_keyboard.flat();
+    const confirmation = () => buttons().find(b => b.callback_data.startsWith('ctl:clear-confirm:')).callback_data;
+    const deletes = () => f.calls.filter(c => c.method === 'deleteMessages');
+    const history = f.assistant.controls.history;
+    const today = Math.floor(f.inbox.now() / 1000);
+    const item = f.inbox.observe('keep-inbox', { source: 'bridge', kind: 'failure', label: 'Check task' });
+    item.notificationMessages = { 802: { sentAt: today * 1000 } };
+    await ownerReply(f, 800, '/unknown', { message_id: 801, chat: { id: 1, type: 'private' } });
+    history.record({ message_id: 803, date: today - 49 * 3600 });
+    history.record({ message_id: 804, date: today, dice: {} });
+    history.record({ message_id: 805, date: today });
+    f.store.save();
+    await f.callback('ctl:clear-chat', home);
+    const canceled = confirmation();
+    await f.callback('ctl:home', home);
+    await f.callback(canceled, home);
+    assert.equal(deletes().length, 0);
+    await f.callback('ctl:clear-chat', home);
+    const action = confirmation();
+    const snapshot = f.inbox.data.panels[home.message_id].clearOffer.ids.map(Number);
+    assert.ok(snapshot.includes(800));
+    assert.ok(snapshot.includes(802));
+    assert.ok(snapshot.includes(805));
+    assert.ok(!snapshot.some(id => [803, 804, home.message_id].includes(id)));
+    await f.callback(action, home, 2);
+    assert.equal(deletes().length, 0);
+    const later = (await f.assistant.send('An answer after the confirmation opened'))[0];
+    await f.callback(action, home);
+    await f.callback(action, home);
+    assert.deepEqual(deletes().map(c => c.params), [{ chat_id: 1, message_ids: snapshot }]);
+    assert.equal(history.entries[String(later.message_id)].removed, undefined);
+    assert.equal(f.inbox.get(item.id).status, 'open');
+    assert.match(JSON.parse(f.inbox.data.panels[home.message_id].signature)[0], /Recent messages cleared/);
+  } finally { f.cleanup(); }
+});
+
+test('Clear chat batches Telegram requests and keeps a failed batch eligible for explicit retry', async () => {
+  const f = fixture(); try {
+    const history = f.assistant.controls.history, date = Math.floor(f.inbox.now() / 1000);
+    for (let id = 1000; id < 1105; id++) history.record({ message_id: id, date });
+    const call = f.assistant.telegram.call;
+    const batches = [];
+    f.assistant.telegram.call = async (method, params) => {
+      if (method === 'deleteMessages') {
+        batches.push(params.message_ids);
+        if (batches.length === 2) throw new Error('Unknown outcome');
+      }
+      return call(method, params);
+    };
+    const targets = history.targets();
+    assert.deepEqual(await history.clear(targets, f.assistant.telegram), { accepted: 100, remaining: 5 });
+    assert.deepEqual(batches.map(batch => batch.length), [100, 5]);
+    assert.deepEqual(history.targets(), ['1100', '1101', '1102', '1103', '1104']);
+    assert.deepEqual(await history.clear(history.targets(), f.assistant.telegram), { accepted: 5, remaining: 0 });
+    assert.deepEqual(history.targets(), []);
+  } finally { f.cleanup(); }
+});
+
 test('Running reuses Home and separates live desktop activity from bridge jobs', async () => {
   const f = fixture(); try {
     f.put('active-desktop', 'input'); f.put('idle-desktop');
@@ -1386,7 +1448,7 @@ test('menu, settings, project selection and connection share the same message', 
     await f.callback(choice, panel);
     assert.equal(f.store.data.selectedProjectId, 'a');
     assert.equal(f.inbox.data.panels[panel.message_id].view, 'home');
-    assert.match(f.calls.filter(c => c.method === 'editMessageText').at(-1).params.text, /Current project: Project A/);
+    assert.match(f.calls.filter(c => c.method === 'editMessageText').at(-1).params.text, /Send to: Project A/);
     await f.callback('ctl:settings', panel);
     await f.callback('ctl:health', panel);
     await f.callback('ctl:home', panel);
