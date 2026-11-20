@@ -93,6 +93,12 @@ test('pair from the packaged setup page and open Home', {
       if (existsSync(join(local, 'instance.json'))) {
         const stop = spawnSync('sh', [join(root, 'scripts', 'stop.sh')], { env, timeout: 40_000 });
         assert.equal(stop.status, 0, 'Listener failed to stop.');
+        // The launcher waits for the lock to disappear. The listener writes
+        // its final health status immediately afterward.
+        await waitFor(() => {
+          try { return JSON.parse(readFileSync(join(local, 'health.json'), 'utf8')).status === 'stopped'; }
+          catch { return false; }
+        }, 'Listener did not publish its stopped status.');
       }
     } finally {
       setup.kill();
