@@ -1318,6 +1318,11 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     history.record({ message_id: 805, date: today });
     f.assistant.controls.housekeeping.record({ message_id: 806 }, 'help');
     f.assistant.controls.housekeeping.record({ message_id: 809, date: today }, 'command');
+    const legacyReplies = f.assistant.controls.housekeeping;
+    legacyReplies.trackReply({ message_id: 810, date: today - 3600 });
+    legacyReplies.submitted('810');
+    legacyReplies.trackReply({ message_id: 811, date: today - 49 * 3600 });
+    legacyReplies.submitted('811');
     const beforeForward = f.sent.length;
     await f.assistant.handleUpdate({ update_id: f.store.data.offset + 1, message: {
       message_id: 807, date: today, text: 'Forwarded message', forward_origin: { type: 'hidden_user' },
@@ -1338,7 +1343,8 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     assert.ok(snapshot.includes(805));
     assert.ok(snapshot.includes(807));
     assert.ok(snapshot.includes(809));
-    assert.ok(!snapshot.some(id => [803, 804, 806, home.message_id].includes(id)));
+    assert.ok(snapshot.includes(810), 'recent replies tracked before upgrading belong in Clear chat');
+    assert.ok(!snapshot.some(id => [803, 804, 806, 811, home.message_id].includes(id)));
     await f.callback(action, home, 2);
     assert.equal(deletes().length, 0);
     const later = (await f.assistant.send('An answer after the confirmation opened'))[0];

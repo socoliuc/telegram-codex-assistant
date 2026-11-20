@@ -33,12 +33,13 @@ export class ChatHistory {
       if (wasRemoved) entry.removed = true;
       records.set(id, entry);
     };
-    // Legacy panels, notifications and commands have delivery times.
+    // Legacy panels, notifications, commands and replies have send times.
     // Route pickers can be registered for housekeeping long after delivery.
     for (const [id, panel] of Object.entries(inbox.panels)) add(id, panel.sentAt, removed(panel.cleanup));
     for (const [id, record] of Object.entries(inbox.housekeeping || {})) {
-      if (record.kind === 'command' || removed(record.cleanup))
-        add(id, record.kind === 'command' ? record.sentAt : undefined, removed(record.cleanup));
+      const userMessage = record.kind === 'command' || record.kind === 'reply';
+      if (userMessage || removed(record.cleanup))
+        add(id, userMessage ? record.sentAt : undefined, removed(record.cleanup));
     }
     for (const item of Object.values(inbox.items)) {
       for (const [id, copy] of Object.entries(item.notificationMessages || {})) add(id, copy.sentAt, removed(copy));
