@@ -99,7 +99,7 @@ export class Telegram {
     for (const group of groups) {
       const form = new FormData();
       form.set('chat_id', String(chatId)); form.set('disable_notification', 'true');
-      if (replyTo) form.set('reply_parameters', JSON.stringify({ message_id: replyTo }));
+      if (replyTo) form.set('reply_parameters', JSON.stringify({ message_id: replyTo, allow_sending_without_reply: true }));
       const media = group.map((image, index) => {
         const field = group.length === 1 ? image.kind : 'image' + index;
         form.set(field, new Blob([image.bytes], { type: image.extension === 'jpg' ? 'image/jpeg' : 'image/' + image.extension }), image.filename);

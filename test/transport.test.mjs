@@ -112,7 +112,7 @@ test('outgoing photos and albums use multipart bytes, safe captions, silence and
     assert.deepEqual(delivered, [11, 12, 13]);
     for (const { form } of requests) {
       assert.equal(form.get('chat_id'), '1'); assert.equal(form.get('disable_notification'), 'true');
-      assert.deepEqual(JSON.parse(form.get('reply_parameters')), { message_id: 42 });
+      assert.deepEqual(JSON.parse(form.get('reply_parameters')), { message_id: 42, allow_sending_without_reply: true });
       assert.ok(!form.has('reply_markup')); // Native controls remain on the text message.
     }
     assert.equal(requests[0].form.get('photo').name, 'image-1.png');

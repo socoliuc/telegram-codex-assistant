@@ -1317,6 +1317,7 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     history.record({ message_id: 804, date: today, dice: {} });
     history.record({ message_id: 805, date: today });
     f.assistant.controls.housekeeping.record({ message_id: 806 }, 'help');
+    f.assistant.controls.housekeeping.record({ message_id: 809, date: today }, 'command');
     const beforeForward = f.sent.length;
     await f.assistant.handleUpdate({ update_id: f.store.data.offset + 1, message: {
       message_id: 807, date: today, text: 'Forwarded message', forward_origin: { type: 'hidden_user' },
@@ -1336,6 +1337,7 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     assert.ok(snapshot.includes(802));
     assert.ok(snapshot.includes(805));
     assert.ok(snapshot.includes(807));
+    assert.ok(snapshot.includes(809));
     assert.ok(!snapshot.some(id => [803, 804, 806, home.message_id].includes(id)));
     await f.callback(action, home, 2);
     assert.equal(deletes().length, 0);
@@ -1372,6 +1374,24 @@ test('Clear chat batches Telegram requests and keeps a failed batch eligible for
     assert.deepEqual(history.targets(), ['1100', '1101', '1102', '1103', '1104']);
     assert.deepEqual(await history.clear(history.targets(), f.assistant.telegram), { accepted: 5, remaining: 0 });
     assert.deepEqual(history.targets(), []);
+  } finally { f.cleanup(); }
+});
+
+test('Clear chat isolates one definite rejection and excludes messages that age out between batches', async () => {
+  const f = fixture(); try {
+    const history = f.assistant.controls.history, date = Math.floor(f.inbox.now() / 1000);
+    for (let id = 1000; id < 1101; id++) history.record({ message_id: id, date });
+    history.record({ message_id: 1101, date: date - 48 * 3600 + 1 });
+    const cleared = [];
+    const telegram = { async call(method, { message_ids }) {
+      assert.equal(method, 'deleteMessages');
+      if (message_ids.includes(1000)) throw Object.assign(new Error('Definite rejection'), { telegramReason: 'message-cannot-delete' });
+      f.advance(1000);
+      cleared.push(...message_ids);
+      return true;
+    } };
+    assert.deepEqual(await history.clear(history.targets(), telegram), { accepted: 100, remaining: 2 });
+    assert.deepEqual(cleared, Array.from({ length: 100 }, (_, index) => 1001 + index));
   } finally { f.cleanup(); }
 });
 

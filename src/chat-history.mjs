@@ -33,11 +33,12 @@ export class ChatHistory {
       if (wasRemoved) entry.removed = true;
       records.set(id, entry);
     };
-    // Legacy panels and notifications have delivery times. Housekeeping can
-    // record a route picker long after delivery, so use only its removed flag.
+    // Legacy panels, notifications and commands have delivery times.
+    // Route pickers can be registered for housekeeping long after delivery.
     for (const [id, panel] of Object.entries(inbox.panels)) add(id, panel.sentAt, removed(panel.cleanup));
     for (const [id, record] of Object.entries(inbox.housekeeping || {})) {
-      if (removed(record.cleanup)) add(id, undefined, true);
+      if (record.kind === 'command' || removed(record.cleanup))
+        add(id, record.kind === 'command' ? record.sentAt : undefined, removed(record.cleanup));
     }
     for (const item of Object.values(inbox.items)) {
       for (const [id, copy] of Object.entries(item.notificationMessages || {})) add(id, copy.sentAt, removed(copy));
@@ -78,24 +79,33 @@ export class ChatHistory {
     this.store.save();
   }
   async clear(ids, telegram) {
-    const records = this.inventory(), now = this.now();
-    const targets = [...new Set(ids)].filter(id => this.eligible(records, id, now));
+    const records = this.inventory();
+    const targets = [...new Set(ids)], chatId = this.store.data.owner.chatId;
     let accepted = 0;
-    for (let i = 0; i < targets.length; i += 100) {
-      const batch = targets.slice(i, i + 100);
+    const sendBatch = async ids => {
+      const now = this.now();
+      const batch = ids.filter(id => this.eligible(records, id, now));
+      if (!batch.length) return true;
       try {
         const result = await telegram.call('deleteMessages', {
-          chat_id: this.store.data.owner.chatId,
+          chat_id: chatId,
           message_ids: batch.map(Number)
         });
-        if (result !== true) break;
-      } catch {
-        // A failed batch may be rate-limited or have an unknown outcome.
-        // Keep it available for a new explicit confirmation.
-        break;
+        if (result !== true) return false;
+      } catch (error) {
+        // Isolate a definite rejection. Stop on a rate limit or an outcome
+        // we cannot verify and leave those messages eligible for user retry.
+        if (error.telegramReason !== 'message-cannot-delete') return false;
+        if (batch.length === 1) return true;
+        const middle = Math.floor(batch.length / 2);
+        return await sendBatch(batch.slice(0, middle)) && await sendBatch(batch.slice(middle));
       }
       this.markRemoved(batch, records);
       accepted += batch.length;
+      return true;
+    };
+    for (let i = 0; i < targets.length; i += 100) {
+      if (!await sendBatch(targets.slice(i, i + 100))) break;
     }
     return { accepted, remaining: ids.length - accepted };
   }
