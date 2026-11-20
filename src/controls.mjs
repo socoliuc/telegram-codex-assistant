@@ -734,6 +734,7 @@ export class Controls {
     item.choiceMarkup ||= {};
     let count = 0;
     for (const id of this.choiceMessages(item)) {
+      if (['deleted', 'missing'].includes(item.notificationMessages?.[id]?.status)) continue;
       const previous = item.choiceMarkup[id];
       if (previous?.signature === signature || previous?.retryAt > this.inbox.now()) continue;
       if (count >= limit) break;

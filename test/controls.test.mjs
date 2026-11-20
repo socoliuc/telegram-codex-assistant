@@ -1308,12 +1308,21 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     const deletes = () => f.calls.filter(c => c.method === 'deleteMessages');
     const history = f.assistant.controls.history;
     const today = Math.floor(f.inbox.now() / 1000);
-    const item = f.inbox.observe('keep-inbox', { source: 'bridge', kind: 'failure', label: 'Check task' });
+    const item = f.inbox.observe('keep-inbox', { source: 'desktop', kind: 'input', label: 'Check task',
+      route: { threadId: 'keep-inbox', hostId: 'local' },
+      choiceQuestions: [{ index: 0, title: 'Which color?', options: ['Blue', 'Green'] }] });
     item.notificationMessages = { 802: { sentAt: today * 1000 } };
     await ownerReply(f, 800, '/unknown', { message_id: 801, chat: { id: 1, type: 'private' } });
     history.record({ message_id: 803, date: today - 49 * 3600 });
     history.record({ message_id: 804, date: today, dice: {} });
     history.record({ message_id: 805, date: today });
+    f.assistant.controls.housekeeping.record({ message_id: 806 }, 'help');
+    const beforeForward = f.sent.length;
+    await f.assistant.handleUpdate({ update_id: f.store.data.offset + 1, message: {
+      message_id: 807, date: today, text: 'Forwarded message', forward_origin: { type: 'hidden_user' },
+      from: { id: 1 }, chat: { id: 1, type: 'private' }
+    } });
+    assert.equal(f.sent.length, beforeForward);
     f.store.save();
     await f.callback('ctl:clear-chat', home);
     const canceled = confirmation();
@@ -1326,15 +1335,20 @@ test('Clear chat asks first and deletes only the confirmed recent messages in th
     assert.ok(snapshot.includes(800));
     assert.ok(snapshot.includes(802));
     assert.ok(snapshot.includes(805));
-    assert.ok(!snapshot.some(id => [803, 804, home.message_id].includes(id)));
+    assert.ok(snapshot.includes(807));
+    assert.ok(!snapshot.some(id => [803, 804, 806, home.message_id].includes(id)));
     await f.callback(action, home, 2);
     assert.equal(deletes().length, 0);
     const later = (await f.assistant.send('An answer after the confirmation opened'))[0];
+    item.notificationMessages[808] = { sentAt: today * 1000 };
     await f.callback(action, home);
     await f.callback(action, home);
     assert.deepEqual(deletes().map(c => c.params), [{ chat_id: 1, message_ids: snapshot }]);
     assert.equal(history.entries[String(later.message_id)].removed, undefined);
     assert.equal(f.inbox.get(item.id).status, 'open');
+    const beforeRefresh = f.calls.length;
+    await f.assistant.controls.refreshChoiceMarkup(item);
+    assert.deepEqual(f.calls.slice(beforeRefresh).map(c => c.params.message_id), [808]);
     assert.match(JSON.parse(f.inbox.data.panels[home.message_id].signature)[0], /Recent messages cleared/);
   } finally { f.cleanup(); }
 });

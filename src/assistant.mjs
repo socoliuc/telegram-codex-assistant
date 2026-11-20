@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { isOwner, rootsOverlap, isWithinRoots, redact, resolveProject, claimUpdate } from './core.mjs';
+import { isOwner, isOwnerChat, rootsOverlap, isWithinRoots, redact, resolveProject, claimUpdate } from './core.mjs';
 import { formatCompletion, jobLabel } from './presentation.mjs';
 import { join } from 'node:path';
 import { telegramImage } from './telegram.mjs';
@@ -743,20 +743,24 @@ export class Assistant {
     if (!claimUpdate(this.store, update.update_id)) return;
     if (update.callback_query) return this.callback(update.callback_query);
     const m = update.message;
-    if (!m || m.chat?.type !== 'private' || m.from?.is_bot || m.forward_origin || m.forward_from || m.sender_chat) return;
+    if (!m?.from || m.chat?.type !== 'private' || m.from.is_bot || m.sender_chat) return;
+    const forwarded = m.forward_origin || m.forward_from;
     let text = m.text?.trim();
     if (!this.store.data.owner) {
+      if (forwarded) return;
       const code = text?.match(/^\/(?:pair|start)\s+(\S+)$/)?.[1];
       if (!this.pairCode || code !== this.pairCode) return;
       this.store.data.owner = { userId: m.from.id, chatId: m.chat.id };
       this.pairCode = undefined;
+      this.controls.history.record(m);
       this.store.save();
       await this.send('Connected. Tell me what you would like to work on, or ask me what is happening with a project.');
       return;
     }
-    if (!isOwner(m, this.store.data.owner)) return;
+    if (!isOwnerChat(m, this.store.data.owner)) return;
     this.controls.history.record(m);
     this.store.save();
+    if (forwarded) return;
     const image = telegramImage(m);
     if (image) text = m.caption?.trim() || 'Describe this image and read any visible text. If it refers to our current task, explain what you can observe.';
     if (!text) { await this.controls.help('You can send me text, a photo, or a JPEG/PNG/WebP image up to 20 MB. I can’t read voice notes or other files yet.'); return; }

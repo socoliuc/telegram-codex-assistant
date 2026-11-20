@@ -33,10 +33,12 @@ export class ChatHistory {
       if (wasRemoved) entry.removed = true;
       records.set(id, entry);
     };
-    // Older installations already know the exact IDs and dates of these
-    // messages. Merge them into the inventory without adopting ID ranges.
+    // Legacy panels and notifications have delivery times. Housekeeping can
+    // record a route picker long after delivery, so use only its removed flag.
     for (const [id, panel] of Object.entries(inbox.panels)) add(id, panel.sentAt, removed(panel.cleanup));
-    for (const [id, record] of Object.entries(inbox.housekeeping || {})) add(id, record.sentAt, removed(record.cleanup));
+    for (const [id, record] of Object.entries(inbox.housekeeping || {})) {
+      if (removed(record.cleanup)) add(id, undefined, true);
+    }
     for (const item of Object.values(inbox.items)) {
       for (const [id, copy] of Object.entries(item.notificationMessages || {})) add(id, copy.sentAt, removed(copy));
     }

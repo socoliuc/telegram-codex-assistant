@@ -5,10 +5,13 @@ export function pathKey(value) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-export function isOwner(message, owner) {
+export function isOwnerChat(message, owner) {
   return Boolean(owner && message?.chat?.type === 'private' && !message?.from?.is_bot &&
-    !message.forward_origin && !message.forward_from && !message.sender_chat &&
-    message.from?.id === owner.userId && message.chat.id === owner.chatId);
+    !message.sender_chat && message.from?.id === owner.userId && message.chat.id === owner.chatId);
+}
+
+export function isOwner(message, owner) {
+  return isOwnerChat(message, owner) && !message.forward_origin && !message.forward_from;
 }
 
 export function rootsOverlap(a, b) {
