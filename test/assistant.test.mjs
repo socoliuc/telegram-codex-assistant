@@ -619,7 +619,7 @@ test('a routing shortlist can open every project, retains the request when metad
     assert.equal(Object.keys(f.store.data.messageRoutes).length, 1);
     await f.assistant.handleUpdate(choose(more.find(b => b.text === 'Cancel').callback_data, 103));
     assert.equal(f.rpc.calls.length, 0);
-    assert.ok(f.assistant.controls.housekeeping.candidates().includes('77'));
+    assert.ok(!f.assistant.controls.housekeeping.candidates().includes('77'));
   } finally { f.cleanup(); }
 });
 

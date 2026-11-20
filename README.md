@@ -42,6 +42,8 @@ On a CLI-only installation, add your project folders to give **Auto** destinatio
 | **Open & reply** | Sends your next plain message to that card’s conversation. An explicit Telegram reply targets the message you quoted. |
 | **Connection** · `/connection` | Shows listener health, project discovery, and the freshness of the desktop connection. |
 
+Navigation, review, and background cleanup leave your messages and Codex results in Telegram. Closed or superseded cards lose their buttons. **Close** removes only the bot panel or notice you tapped, and bulk cleanup is limited to bot panels and notices.
+
 ## Where your messages go
 
 The listener runs on your PC. It receives messages through the Telegram Bot API using long polling and sends project work to the local Codex app-server using your existing Codex sign-in. It needs an outbound connection to Telegram and Codex. Setup binds only to loopback and needs no public webhook or port forwarding.

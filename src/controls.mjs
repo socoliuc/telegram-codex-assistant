@@ -56,6 +56,10 @@ export class Controls {
   }
   help(text) { return this.housekeeping.notice(text); }
   receipt(text) { return this.housekeeping.notice(text, { clearAfterMs: 5000 }); }
+  acknowledge(q) {
+    // The client spinner can expire independently of the actual action.
+    void this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id }).catch(() => {});
+  }
   async confirm(q, text) {
     try { await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id,
       text: short(redact(text, [this.a.telegram.token]), 190) }); }
@@ -66,6 +70,12 @@ export class Controls {
     const valid = id => panels[id] && !panels[id].dismissedAt && panels[id].view !== 'digest';
     const id = valid(this.inbox.data.homePanelId) ? this.inbox.data.homePanelId : Object.keys(panels).reverse().find(valid);
     return id ? { message_id: Number(id) } : undefined;
+  }
+  isBotMessage(message) {
+    const botId = Number(String(this.a.telegram.token).split(':')[0]);
+    return Boolean(botId && message?.from?.id === botId && message.from.is_bot &&
+      message.chat?.id === this.store.data.owner.chatId && message.chat?.type === 'private' &&
+      !message.forward_origin && !message.forward_from && !message.sender_chat);
   }
   open(view = 'home', message, afterMessageId = 0) {
     if (view === 'home' || view === 'general' || view === 'browse') this.clearReplyDestination();
@@ -401,10 +411,10 @@ export class Controls {
     } else if (view === 'cleanup') {
       const counts = Object.fromEntries(Object.entries(cleanupOffer.targets).map(([key, ids]) => [key, ids.length]));
       const manual = Object.values(this.housekeeping.records).filter(item => item.cleanup?.status === 'manual').length;
-      text = `Cleanup\n\nClear all clutter removes other panels, commands, sent replies and confirmations.\nHome, pending or uncertain replies, questions, approvals, failures and unreviewed updates stay.\n\nClose other panels: ${counts.panels}\nClear commands, replies and notices: ${counts.chat}\nMark completed updates reviewed: ${counts.updates}\n\nOnly tracked messages can be cleared in bulk. Reply /dismiss to an older sent message to remove it.${manual ? `\n\n${manual} older sent ${manual === 1 ? 'message needs' : 'messages need'} Telegram’s Delete action.` : ''}`;
-      rows = [[button(`Clear all clutter · ${counts.panels + counts.chat}`, 'clean:all:' + cleanupOffer.nonce)],
+      text = `Cleanup\n\nRemove old bot panels or notices here. Your messages and delivered Codex results stay in the chat.\n\nOther panels: ${counts.panels}\nBot notices: ${counts.chat}\nCompleted updates to review: ${counts.updates}${manual ? `\n\n${manual} older sent ${manual === 1 ? 'message needs' : 'messages need'} Telegram’s Delete action.` : ''}`;
+      rows = [[button(`Clear bot panels and notices · ${counts.panels + counts.chat}`, 'clean:all:' + cleanupOffer.nonce)],
         [button(`Close other panels · ${counts.panels}`, 'clean:panels:' + cleanupOffer.nonce)],
-        [button(`Clear commands / replies / notices · ${counts.chat}`, 'clean:chat:' + cleanupOffer.nonce)],
+        [button(`Clear bot notices · ${counts.chat}`, 'clean:chat:' + cleanupOffer.nonce)],
         [button(`Mark updates reviewed · ${counts.updates}`, 'clean:updates:' + cleanupOffer.nonce)],
         [button('↻ Refresh', 'cleanup'), moreButton, homeButton]];
     } else if (view === 'running') {
@@ -414,7 +424,8 @@ export class Controls {
         desktop = active.length ? active.slice(0, 12).map(row => '• ' + short(row.title || '(untitled)', 150)).join('\n') : 'No active chats in the latest desktop listing.';
         if (active.length > 12) desktop += `\n…and ${active.length - 12} more.`;
       } catch { desktop = 'Current desktop activity is unavailable.'; }
-      text = `Running work\n\nCodex desktop\n${desktop}\n\nWork requested through Telegram\n${formatJobs(this.a.jobs())}`;
+      const pending = this.a.jobs().filter(job => ['dispatching', 'running', 'awaiting_approval', 'stopping', 'uncertain', 'interrupted'].includes(job.status));
+      text = `Running work\n\nCodex desktop\n${desktop}\n\nWork requested through Telegram\n${pending.length ? formatJobs(pending) : 'No Telegram work is running.'}`;
       rows = [[button('↻ Refresh', 'running'), homeButton]];
     } else if (view === 'health') {
       const snapshot = this.a.context?.snapshot;
@@ -439,11 +450,11 @@ export class Controls {
       for (const id of offer.targets.panels) {
         const target = this.inbox.data.panels[id];
         if (!target || target.dismissedAt || id === String(q.message.message_id) || id === String(this.inbox.data.homePanelId)) continue;
-        target.dismissedAt = this.inbox.now(); target.expiresAt = 0; target.cleanup = { sentAt: target.sentAt }; count++;
+        target.dismissedAt = this.inbox.now(); target.expiresAt = 0; target.cleanup = { sentAt: target.sentAt, deleteRequested: true }; count++;
       }
       this.store.save();
     }
-    if (['chat', 'all', 'bot'].includes(scope)) count += this.housekeeping.queue(offer.targets.chat);
+    if (['chat', 'all', 'bot'].includes(scope)) count += this.housekeeping.queue(offer.targets.chat, { deleteRequested: true });
     if (scope === 'updates') for (const id of offer.targets.updates) {
       const item = this.inbox.get(id);
       if (item?.kind === 'completion' && isVisible(item) && this.inbox.review(id)) count++;
@@ -511,11 +522,8 @@ export class Controls {
     if (!panel) {
       // Before project pickers joined the panel registry, only their Telegram
       // message remains. Accept an owner reply to this bot's exact legacy shape.
-      const botId = Number(String(this.a.telegram.token).split(':')[0]);
       const rows = message.reply_markup?.inline_keyboard;
-      if (!botId || message.from?.id !== botId || !message.from?.is_bot ||
-          message.chat?.id !== this.store.data.owner.chatId || message.chat?.type !== 'private' ||
-          message.forward_origin || message.forward_from || message.sender_chat ||
+      if (!this.isBotMessage(message) ||
           this.store.data.desktopReplies?.[id] || this.store.data.inputReplies?.[id] || this.store.data.replies?.[id] ||
           !/^Current project: [^\n]+\n\nChoose a project for your next messages,/.test(message.text || '') ||
           !rows?.length || !rows.flat().length || !rows.flat().every(b => /^project:[a-f0-9]{16}:\d+$/.test(b.callback_data || '')))
@@ -524,6 +532,7 @@ export class Controls {
     }
     panel.dismissedAt ||= this.inbox.now(); panel.expiresAt = 0;
     panel.cleanup ||= { sentAt: panel.sentAt };
+    panel.cleanup.deleteRequested = true;
     if (String(this.store.data.activeChat?.panelId) === id) delete this.store.data.activeChat;
     if (String(this.inbox.data.homePanelId) === id) delete this.inbox.data.homePanelId;
     this.store.save();
@@ -547,17 +556,41 @@ export class Controls {
     if (verb === 'clean') return this.runCleanup(q, value, action.split(':')[2]);
     if (action === 'home') {
       const selected = this.clearReplyDestination();
-      try { await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id }); }
-      catch { /* The callback receipt cannot change the owner's Home selection. */ }
+      this.acknowledge(q);
       const panel = this.inbox.data.panels[String(q.message?.message_id)];
       if (panel?.dismissedAt) return this.open('home');
       return !panel && selected
         ? this.open('home', undefined, q.message?.message_id) : this.open('home', q.message);
     }
-    await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id });
+    const id = String(q.message?.message_id);
+    const panel = this.inbox.data.panels[id];
+    if (!panel && ['item', 'review', 'snooze'].includes(verb)) {
+      const item = this.inbox.get(value);
+      const ownCard = this.isBotMessage(q.message) && /^[1-9]\d*$/.test(id) &&
+        q.message.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === q.data);
+      if (item && ownCard && !notificationIds(this, item).includes(id)) {
+        // A valid tap proves the bot message arrived, even if sendMessage's
+        // acknowledgement was lost. Recover only this exact notification.
+        this.record(item, q.message);
+        if (['sending', 'unknown'].includes(item.delivery)) {
+          item.delivery = 'delivered';
+          this.store.data.notices[item.key] = 'delivered';
+          this.store.save();
+        }
+      }
+      if (!item || !isVisible(item)) {
+        await this.confirm(q, item?.status === 'reviewed' ? 'This update was already reviewed.' : 'This update is closed.');
+        if (item) await this.refreshChoiceMarkup(item);
+        else if (ownCard) await this.a.telegram.call('editMessageReplyMarkup', {
+          chat_id: this.store.data.owner.chatId, message_id: Number(id), reply_markup: { inline_keyboard: [] }
+        }).catch(() => {});
+        return;
+      }
+    }
+    this.acknowledge(q);
     if (verb === 'close') return this.dismissPanel(q.message);
     if (verb === 'hide') return this.housekeeping.dismiss(q.message?.message_id);
-    if (this.inbox.data.panels[String(q.message?.message_id)]?.dismissedAt) return;
+    if (panel?.dismissedAt) return;
     if (verb === 'item') return this.item(value);
     if (verb === 'snooze') { this.inbox.snooze(value); return this.open('snoozed:0', q.message); }
     if (verb === 'review') {
@@ -566,7 +599,6 @@ export class Controls {
     }
     if (verb === 'projects' && /^projects(?::\d+)?$/.test(action)) return this.open(action, q.message);
     const settings = this.inbox.data.settings;
-    const panel = this.inbox.data.panels[String(q.message?.message_id)];
     const setting = ['notify', 'mode', 'quiet', 'urgent', 'detail', 'mute'].includes(verb);
     if (setting) {
       if (!panel || panel.dismissedAt || panel.view !== 'settings' || panel.expiresAt <= this.inbox.now()) return this.open('settings', q.message);

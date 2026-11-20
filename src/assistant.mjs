@@ -760,9 +760,6 @@ export class Assistant {
       this.controls.housekeeping.record(m, 'command');
       if (!await this.controls.dismissPanel(m.reply_to_message) && !await this.controls.housekeeping.dismissMessage(m.reply_to_message))
         await this.controls.help('Reply with /dismiss to a menu, notice or older message you sent, or open /cleanup. Pending replies stay until delivery is confirmed.');
-      else if (m.message_id) {
-        await this.controls.housekeeping.dismiss(m.message_id);
-      }
       return;
     }
     const command = !image && text.match(/^\/(menu|help|start|inbox|settings|connection|updates|project|projects|chats|general|status|cleanup)(?:@\w+)?$/)?.[1];
@@ -848,7 +845,7 @@ export class Assistant {
     }
     const selectedProjectId = this.store.data.selectedProjectId || null;
     const generalDestination = this.store.data.generalDestination;
-    this.controls.housekeeping.trackReply(m, undefined, Boolean(replyJob));
+    this.controls.housekeeping.trackReply(m);
     // Serialize starts/steers, while approval callbacks bypass this queue above.
     this.serial = this.serial.catch(() => {}).then(async () => {
       this.assertRunning();

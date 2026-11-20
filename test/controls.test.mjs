@@ -359,7 +359,7 @@ test('held media delivery cannot stall the independent notification cleanup time
     pending = c.heldPending || c.cleanupPending;
     f.inbox.resolve(old, 'Answered in Codex.'); t.mock.timers.tick(2000);
     await new Promise(resolve => setImmediate(resolve));
-    assert.ok(f.calls.some(call => call.method === 'deleteMessage' && call.params.message_id === original.message_id));
+    assert.ok(f.calls.some(call => call.method === 'editMessageReplyMarkup' && call.params.message_id === original.message_id));
     assert.equal(item.delivery, 'sending'); assert.equal(f.sent.length, 1, 'media preparation is still blocked');
     release(); await pending;
   } finally { f.assistant.controls.stopCleanup(); release?.(); await pending; f.cleanup(); }
@@ -421,8 +421,8 @@ test('answers made in Codex clear the inbox and every Telegram copy without subm
     assert.match(panelEdit.params.text, /No open requests/);
     assert.doesNotMatch(JSON.stringify(panelEdit.params.reply_markup), new RegExp(item.id));
     for (const id of item.messageIds) {
-      assert.ok(f.calls.some(c => c.method === 'deleteMessage' && String(c.params.message_id) === id),
-        'every answered notification copy disappears');
+      assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && String(c.params.message_id) === id),
+        'every answered notification copy loses its stale controls');
       assert.equal(f.store.data.desktopReplies[id].threadId, 'reverse-answer', 'routes remain as tombstones');
     }
     const before = f.calls.length; await f.assistant.controls.flush(); assert.equal(f.calls.length, before);
@@ -443,7 +443,7 @@ test('continuing a chat in Codex clears its preceding update and copies from an 
     await f.scan(); await f.assistant.controls.flush();
     assert.equal(item.status, 'resolved'); assert.equal(item.continuedByTurnId, 'codex-followup');
     assert.equal(other.status, 'open'); assert.equal(f.inbox.list('updates').length, 1);
-    assert.ok(item.messageIds.every(id => f.calls.some(c => c.method === 'deleteMessage' && String(c.params.message_id) === id)));
+    assert.ok(item.messageIds.every(id => f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && String(c.params.message_id) === id)));
     assert.ok(f.calls.some(c => c.method === 'editMessageText' && c.params.message_id === panel.message_id && /Recent updates · 1/.test(c.params.text)));
     assert.equal(f.submissions.length, 0); assert.equal(f.native.length, 0);
   } finally { f.cleanup(); }
@@ -473,7 +473,7 @@ test('resolved notifications clear on their own timer while an unrelated history
     t.mock.timers.tick(2000);
     await new Promise(resolve => setImmediate(resolve));
     await f.assistant.controls.cleanupPending;
-    assert.ok(item.messageIds.every(id => f.calls.some(c => c.method === 'deleteMessage' && String(c.params.message_id) === id)),
+    assert.ok(item.messageIds.every(id => f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && String(c.params.message_id) === id)),
       'cleanup must not wait for the rest of the catalog scan or another user message');
     assert.ok(f.calls.some(c => c.method === 'editMessageText' && c.params.message_id === panel.message_id && /Recent updates · 0/.test(c.params.text)));
     assert.equal(f.submissions.length, 0);
@@ -536,20 +536,20 @@ test('a failed closed-question edit retries later without reopening or resubmitt
     f.inbox.resolve(item, 'Answered in Codex.');
     const call = f.assistant.telegram.call;
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'editMessageText') throw new Error('Temporary connection failure');
+      if (method === 'editMessageReplyMarkup') throw new Error('Temporary connection failure');
       return call(method, params);
     };
     await f.assistant.controls.flush();
     assert.equal(f.inbox.list().length, 0); assert.equal(f.submissions.length, 0);
     assert.ok(item.notificationMessages[item.messageIds[0]].retryAt > f.inbox.now());
     f.assistant.telegram.call = call; f.advance(60_001); await f.assistant.controls.flush();
-    const edit = f.calls.find(c => c.method === 'editMessageText');
-    assert.match(edit.params.text, /Answered in Codex/); assert.deepEqual(edit.params.reply_markup.inline_keyboard, []);
+    const edit = f.calls.find(c => c.method === 'editMessageReplyMarkup');
+    assert.deepEqual(edit.params.reply_markup.inline_keyboard, []);
     assert.equal(f.inbox.list().length, 0); assert.equal(f.submissions.length, 0);
   } finally { f.cleanup(); }
 });
 
-test('review deletes the notification and its images, refreshes Updates, and preserves task state', async () => {
+test('review preserves the notification and its images, refreshes Updates, and preserves task state', async () => {
   const f = fixture(); try {
     f.put('review-cleanup'); await f.scan();
     const item = f.inbox.list('updates')[0], message = f.sent[0].message;
@@ -558,16 +558,16 @@ test('review deletes the notification and its images, refreshes Updates, and pre
     await f.assistant.controls.show('updates:0'); const panelId = f.sent.at(-1).message.message_id;
     await f.callback('ctl:review:' + item.id, message);
     assert.equal(item.status, 'reviewed');
-    assert.deepEqual(f.calls.filter(c => c.method === 'deleteMessage').map(c => c.params.message_id).sort((a,b) => a-b), [message.message_id, 500]);
+    assert.deepEqual(f.calls.filter(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0).map(c => c.params.message_id).sort((a,b) => a-b), [message.message_id, 500]);
     assert.ok(f.calls.some(c => c.method === 'editMessageText' && c.params.message_id === panelId && /Recent updates · 0/.test(c.params.text)));
     assert.equal(f.submissions.length, 0);
-    const deleted = f.calls.filter(c => c.method === 'deleteMessage').length;
+    const edits = f.calls.filter(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0).length;
     await f.assistant.controls.flush();
-    assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, deleted, 'successful deletes are durable');
+    assert.equal(f.calls.filter(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0).length, edits, 'successful closures are durable');
   } finally { f.cleanup(); }
 });
 
-test('confirmed Telegram answers disappear, but partial and uncertain submissions remain visible', async () => {
+test('confirmed Telegram answers retire controls, but partial and uncertain submissions remain visible', async () => {
   const f = fixture(); try {
     const h = f.put('cleanup-answer', 'input');
     h.turns[0].items[0].text = 'Which color?\n- Blue\n- Green\n\nWhich size?\n- Small\n- Large';
@@ -576,7 +576,7 @@ test('confirmed Telegram answers disappear, but partial and uncertain submission
     assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, 0);
     assert.ok(f.inbox.list().includes(item));
     await f.callback(answerButtons(message)[3].callback_data, message.message); await f.assistant.serial;
-    assert.ok(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === message.message.message_id));
+    assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === message.message.message_id));
     assert.equal(f.inbox.list().includes(item), false);
     assert.equal(item.status, 'open', 'submission must not pretend Codex completed the request');
     const uncertainHistory = f.put('cleanup-unknown', 'input');
@@ -589,20 +589,20 @@ test('confirmed Telegram answers disappear, but partial and uncertain submission
   } finally { f.cleanup(); }
 });
 
-test('notification deletion retries transient failures and records missing or old messages durably', async () => {
+test('notification control removal retries transient failures and records missing or old messages durably', async () => {
   const f = fixture(); try {
     f.put('delete-retry', 'input'); await f.scan(); const item = f.inbox.list()[0];
     f.inbox.resolve(item, 'Answered in Codex.');
     let attempts = 0; const call = f.assistant.telegram.call;
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'deleteMessage') { attempts++; throw Object.assign(new Error('Slow down'), { retryAfter: 120 }); }
+      if (method === 'editMessageReplyMarkup') { attempts++; throw Object.assign(new Error('Slow down'), { retryAfter: 120 }); }
       return call(method, params);
     };
     await f.assistant.controls.flush(); await f.assistant.controls.flush();
     assert.equal(attempts, 1);
     f.advance(120_001);
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'deleteMessage') { attempts++; throw Object.assign(new Error('Gone'), { telegramReason: 'message-missing' }); }
+      if (method === 'editMessageReplyMarkup') { attempts++; throw Object.assign(new Error('Gone'), { telegramReason: 'message-missing' }); }
       return call(method, params);
     };
     await f.assistant.controls.flush(); await f.assistant.controls.flush();
@@ -626,7 +626,7 @@ test('legacy undeletable notifications close without buttons and stay closed acr
       return call(method, params);
     };
     await f.assistant.controls.flush();
-    assert.ok(f.calls.some(c => c.method === 'editMessageCaption' && c.params.message_id === 501 && /reviewed/.test(c.params.caption)));
+    assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === 501));
     for (const edit of f.calls.filter(c => /^editMessage/.test(c.method))) assert.deepEqual(edit.params.reply_markup.inline_keyboard, []);
     const saved = new StateStore(f.store.file); const restored = new Inbox(saved);
     assert.equal(restored.list('updates').length, 0);
@@ -664,9 +664,9 @@ test('multipart question refresh preserves chunks instead of duplicating the who
     f.advance(49 * 60 * 60_000);
     f.inbox.resolve(item, 'Answered in Codex.');
     await f.assistant.controls.refreshChoiceMarkup(item);
-    const closed = payloads.filter(p => p.method === 'editMessageText');
+    const closed = payloads.filter(p => p.method === 'editMessageReplyMarkup' && p.params.reply_markup.inline_keyboard.length === 0);
     assert.equal(closed.length, 2);
-    assert.ok(closed.every(p => p.params.text.length < 200 && p.params.reply_markup.inline_keyboard.length === 0));
+    assert.ok(closed.every(p => p.params.text === undefined && p.params.reply_markup.inline_keyboard.length === 0));
   } finally { f.cleanup(); }
 });
 test('desktop images beyond the brief summary retain exact reply routing and are not resent by Details', async () => {
@@ -728,7 +728,7 @@ test('a media-failure notice leaves the first Details message selected without f
     f.assistant.routeFreshMessage = async text => { general = text; return 'awaiting-route'; };
     await f.say('New general question'); await f.assistant.serial;
     assert.equal(general, 'New general question');
-    const edits = f.calls.filter(c => c.method === 'editMessageText');
+    const edits = f.calls.filter(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0);
     assert.equal(edits.length, 2);
     assert.ok(edits.every(c => !c.params.reply_markup.force_reply && !c.params.reply_markup.inline_keyboard.length));
   } finally { f.cleanup(); }
@@ -791,7 +791,7 @@ test('desktop choices send the full answer to the source once across project swi
     await f.callback(answerButtons(original)[1].callback_data, original.message); await f.assistant.serial;
     assert.equal(f.submissions.length, 1); assert.equal(f.submissions[0].id, 'choices');
     assert.ok(f.submissions[0].text.includes(label)); assert.equal(f.store.data.selectedProjectId, 'b');
-    assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, 2);
+    assert.equal(f.calls.filter(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0).length, 2);
     assert.equal(answerButtons({ keyboard: f.assistant.controls.buttons(item) }).length, 0);
   } finally { f.cleanup(); }
 });
@@ -1111,7 +1111,7 @@ const ownerReply = (f, id, text, target) => f.assistant.handleUpdate({ update_id
     from: { id: 1 }, chat: { id: 1, type: 'private' },
     ...(target ? { reply_to_message: typeof target === 'object' ? target : { message_id: target } } : {}) } });
 
-test('sent replies clear with their notification and the success confirmation expires', async () => {
+test('sent replies and notifications are retained and the confirmation loses its buttons', async () => {
   const f = fixture(); try {
     f.put('reply-clutter'); await f.scan();
     const item = f.inbox.list('updates')[0], original = f.sent[0].message;
@@ -1119,15 +1119,16 @@ test('sent replies clear with their notification and the success confirmation ex
     f.store.data.selectedProjectId = 'b';
     await ownerReply(f, 9001, 'Thanks, will do', details.message_id); await f.assistant.serial;
     await f.assistant.controls.flushCleanup();
-    for (const id of [original.message_id, details.message_id, 9001])
-      assert.ok(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === id), `clear delivered reply group ${id}`);
+    for (const id of [original.message_id, details.message_id])
+      assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === id));
+    assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, 0);
     assert.equal(f.submissions[0].id, 'reply-clutter'); assert.equal(f.inbox.list('updates').length, 0);
     assert.equal(f.inbox.data.housekeeping['9001'].delivery, 'submitted');
     const receipt = f.sent.at(-1).message;
     assert.match(f.sent.at(-1).text, /Sent your reply/);
     assert.ok(!f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === receipt.message_id));
     f.advance(5001); await f.assistant.controls.flushCleanup();
-    assert.ok(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === receipt.message_id));
+    assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === receipt.message_id));
     assert.ok(f.store.data.desktopReplies[details.message_id], 'cleanup preserves exact reply routes');
   } finally { f.cleanup(); }
 });
@@ -1151,7 +1152,7 @@ test('typed commands bring controls forward, inline buttons reuse them, and an u
   } finally { f.cleanup(); }
 });
 
-test('Clear all clutter uses one snapshot and keeps uncertain replies, requests, updates and Home', async () => {
+test('Clear bot panels and notices uses one snapshot and keeps uncertain replies, requests, updates and Home', async () => {
   const f = fixture(); try {
     await ownerReply(f, 9001, '/menu');
     await f.assistant.controls.show('settings'); const other = f.sent.at(-1).message;
@@ -1163,14 +1164,14 @@ test('Clear all clutter uses one snapshot and keeps uncertain replies, requests,
     await ownerReply(f, 9003, '/cleanup');
     const home = f.sent.at(-1).message;
     const buttons = f.sent.at(-1).keyboard.inline_keyboard.flat();
-    const action = buttons.find(b => b.text.startsWith('Clear all clutter')).callback_data;
+    const action = buttons.find(b => b.text.startsWith('Clear bot panels and notices')).callback_data;
     await f.assistant.controls.help('A newly arrived notice'); const fresh = f.sent.at(-1).message;
     await f.callback(action, home, 2);
     assert.ok(!f.inbox.data.panels[other.message_id].dismissedAt);
     await f.callback(action, home); await f.assistant.controls.flushCleanup();
-    for (const id of [9001, 9003, help.message_id, other.message_id])
+    for (const id of [help.message_id, other.message_id])
       assert.ok(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === id));
-    for (const id of [9002, home.message_id, original, fresh.message_id])
+    for (const id of [9001, 9002, 9003, home.message_id, original, fresh.message_id])
       assert.ok(!f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === id));
     assert.equal(item.status, 'open'); assert.equal(f.inbox.list().length, 1);
     assert.ok(f.inbox.data.housekeeping['9002']);
@@ -1193,7 +1194,7 @@ test('partial native text answers stay until the entire group reaches Codex', as
     await ownerReply(f, 9003, 'Red', first.message_id);
     await ownerReply(f, 9002, 'Large', second.message_id); await f.assistant.controls.flushCleanup();
     assert.equal(f.native.length, 1);
-    for (const id of [9001, 9002]) assert.ok(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === id));
+    for (const id of [9001, 9002]) assert.ok(!f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === id));
     assert.ok(!f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === 9003), 'a rejected duplicate answer was never sent');
     assert.ok(!f.assistant.controls.housekeeping.candidates().includes('9003'));
     assert.equal(f.inbox.list().length, 0);
@@ -1212,7 +1213,7 @@ test('dismiss can remove an older owner message without adopting foreign or forw
   } finally { f.cleanup(); }
 });
 
-test('Cleanup opens from More and an undeletable owner reply is never edited', async () => {
+test('Cleanup opens from More and preserves the owner message', async () => {
   const f = fixture(); try {
     f.assistant.coordinate = async () => {};
     await ownerReply(f, 9001, 'An ordinary accepted prompt'); await f.assistant.serial;
@@ -1220,7 +1221,7 @@ test('Cleanup opens from More and an undeletable owner reply is never edited', a
     await ownerReply(f, 9002, '/menu'); const home = f.sent.at(-1).message;
     assert.ok(!f.sent.at(-1).keyboard.inline_keyboard.flat().some(b => b.callback_data.startsWith('ctl:clean:')));
     await f.callback('ctl:more', home); await f.callback('ctl:cleanup', home);
-    const action = f.calls.filter(c => c.method === 'editMessageText').at(-1).params.reply_markup.inline_keyboard.flat().find(b => b.text.startsWith('Clear all clutter')).callback_data;
+    const action = f.calls.filter(c => c.method === 'editMessageText').at(-1).params.reply_markup.inline_keyboard.flat().find(b => b.text.startsWith('Clear bot panels and notices')).callback_data;
     const call = f.assistant.telegram.call;
     f.assistant.telegram.call = async (method, params) => {
       if (method === 'deleteMessage' && params.message_id === 9001)
@@ -1228,10 +1229,73 @@ test('Cleanup opens from More and an undeletable owner reply is never edited', a
       return call(method, params);
     };
     await f.callback(action, home); await f.assistant.controls.flushCleanup();
-    assert.equal(f.inbox.data.housekeeping['9001'].cleanup.status, 'manual');
+    assert.equal(f.inbox.data.housekeeping['9001'].cleanup, undefined);
     assert.ok(!f.calls.some(c => /^editMessage/.test(c.method) && c.params.message_id === 9001));
     assert.equal(f.inbox.data.panels[home.message_id].view, 'cleanup');
     assert.equal(f.sent.length, 1, 'the clear action updates Home without appending another panel');
+  } finally { f.cleanup(); }
+});
+
+test('a rejected callback acknowledgement cannot block Close or Refresh', async () => {
+  const f = fixture(); try {
+    await f.say('/menu');
+    const panel = f.sent.at(-1).message;
+    await f.callback('ctl:running', panel);
+    const call = f.assistant.telegram.call;
+    f.assistant.telegram.call = async (method, params) => {
+      if (method === 'answerCallbackQuery') throw Object.assign(new Error('Callback acknowledgement expired'), { code: 400 });
+      return call(method, params);
+    };
+    f.put('new-active-task', 'input');
+    await f.callback('ctl:running', panel);
+    assert.match(f.calls.filter(entry => entry.method === 'editMessageText').at(-1).params.text, /new-active-task/);
+    await f.callback('ctl:close', panel);
+    assert.deepEqual(f.calls.filter(entry => entry.method === 'deleteMessage').map(entry => entry.params.message_id), [panel.message_id]);
+  } finally { f.cleanup(); }
+});
+
+test('a verified tap retires a reviewed update whose delivery acknowledgement was lost', async () => {
+  const f = fixture(); try {
+    f.assistant.telegram.token = '111222:' + 'fixture'.repeat(5);
+    const item = f.inbox.observe('uncertain-notification', { source: 'desktop', kind: 'completion',
+      label: 'An update', text: 'The full update stays here.', route: { threadId: 'source', hostId: 'local' } });
+    item.delivery = 'unknown';
+    f.inbox.review(item.id);
+    const data = 'ctl:item:' + item.id;
+    const card = { message_id: 891, chat: { id: 1, type: 'private' }, from: { id: 111222, is_bot: true },
+      reply_markup: { inline_keyboard: [[{ text: 'Open & reply', callback_data: data }]] } };
+    await f.callback(data, { ...card, message_id: 892, from: { id: 111223, is_bot: true } });
+    assert.equal(item.messageIds, undefined);
+    await f.callback(data, card);
+    assert.equal(item.delivery, 'delivered');
+    assert.deepEqual(item.messageIds, ['891']);
+    assert.equal(f.inbox.data.nextReplyMessageId, undefined);
+    assert.ok(f.calls.some(c => c.method === 'answerCallbackQuery' && /already reviewed/.test(c.params.text)));
+    assert.deepEqual(f.calls.filter(c => c.params.message_id === 891).map(({ method }) => method), ['editMessageReplyMarkup']);
+  } finally { f.cleanup(); }
+});
+
+test('navigation and automatic housekeeping preserve sent messages and delivered updates', async () => {
+  const f = fixture(); try {
+    await f.say('/menu');
+    const first = f.sent.at(-1).message;
+    await ownerReply(f, 9001, '/status');
+    const second = f.sent.at(-1).message;
+    const h = f.assistant.controls.housekeeping;
+    h.trackReply({ message_id: 9002 });
+    h.submitted(9002);
+    f.put('reviewed-update'); await f.scan();
+    const item = f.inbox.list('updates')[0];
+    f.inbox.review(item.id);
+    f.advance(90_000);
+    await f.assistant.controls.flushCleanup();
+    assert.ok(f.inbox.data.panels[first.message_id].dismissedAt);
+    assert.ok(!f.inbox.data.panels[second.message_id].dismissedAt);
+    assert.deepEqual(f.calls.filter(entry => entry.method === 'deleteMessage'), []);
+    for (const id of [first.message_id, ...item.messageIds]) {
+      assert.ok(f.calls.some(entry => entry.method === 'editMessageReplyMarkup' &&
+        entry.params.message_id === Number(id) && entry.params.reply_markup.inline_keyboard.length === 0));
+    }
   } finally { f.cleanup(); }
 });
 
@@ -1273,7 +1337,7 @@ test('Cleanup uses the displayed snapshot and protects questions, approvals, fai
   } finally { f.cleanup(); }
 });
 
-test('Cleanup closes other panels and handles command deletion retries without editing user messages', async () => {
+test('Cleanup closes other bot panels and retries bot notice deletion without editing user messages', async () => {
   const f = fixture(); try {
     await f.say('/menu');
     await f.assistant.controls.show('settings'); const other = f.sent.at(-1).message;
@@ -1284,23 +1348,26 @@ test('Cleanup closes other panels and handles command deletion retries without e
     const panelAction = keyboard().find(b => b.callback_data.startsWith('ctl:clean:panels:')).callback_data;
     await f.assistant.callback({ id: 'clean-panels', data: panelAction, from: { id: 1 }, message: home });
     assert.ok(f.inbox.data.panels[other.message_id].dismissedAt); assert.ok(!f.inbox.data.panels[home.message_id].dismissedAt);
+    const notice = (await f.assistant.controls.help('Retry this notice'))[0];
+    await f.callback('ctl:cleanup', home);
     const chatAction = keyboard().find(b => b.callback_data.startsWith('ctl:clean:chat:')).callback_data;
     const call = f.assistant.telegram.call; let deletes = 0;
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'deleteMessage' && params.message_id === 9001) { deletes++; throw Object.assign(new Error('Slow'), { retryAfter: 60 }); }
+      if (method === 'deleteMessage' && params.message_id === notice.message_id) { deletes++; throw Object.assign(new Error('Slow'), { retryAfter: 60 }); }
       return call(method, params);
     };
     await f.assistant.callback({ id: 'clean-chat', data: chatAction, from: { id: 1 }, message: home });
     await f.assistant.controls.flush(); assert.equal(deletes, 1);
     f.advance(60_001);
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'deleteMessage' && params.message_id === 9001) throw Object.assign(new Error('Old'), { telegramReason: 'message-cannot-delete' });
+      if (method === 'deleteMessage' && params.message_id === notice.message_id) throw Object.assign(new Error('Old'), { telegramReason: 'message-cannot-delete' });
       return call(method, params);
     };
     await f.assistant.controls.flush();
-    assert.equal(f.inbox.data.housekeeping['9001'].cleanup.status, 'manual');
-    assert.ok(!f.calls.some(c => c.method === 'editMessageText' && c.params.message_id === 9001));
+    assert.equal(f.inbox.data.housekeeping[notice.message_id].cleanup.status, 'closed');
+    assert.ok(!f.calls.some(c => c.method === 'editMessageText' && c.params.message_id === notice.message_id));
     assert.ok(!f.inbox.data.panels[home.message_id].dismissedAt);
+    assert.equal(f.inbox.data.housekeeping['9001'].cleanup, undefined);
   } finally { f.cleanup(); }
 });
 
@@ -1396,8 +1463,8 @@ test('closing panels retries transient failures and leaves old undeletable menus
       return call(method, params);
     };
     await f.callback('ctl:close', old);
-    const edit = f.calls.find(c => c.method === 'editMessageText' && c.params.message_id === old.message_id);
-    assert.deepEqual(edit.params.reply_markup.inline_keyboard, []); assert.match(edit.params.text, /closed/i);
+    const edit = f.calls.find(c => c.method === 'editMessageReplyMarkup' && c.params.message_id === old.message_id);
+    assert.deepEqual(edit.params.reply_markup.inline_keyboard, []);
     assert.equal(f.inbox.data.panels[old.message_id].cleanup.status, 'closed');
     assert.equal(f.sent.length, 2);
   } finally { f.cleanup(); }
@@ -1438,9 +1505,9 @@ test('a closed panel survives an interrupted cleanup start and an in-flight inbo
     release(); await Promise.all([closing, refresh]);
     assert.equal(deletedDuringEdit, false, 'closure must wait until the earlier edit finishes');
     assert.equal(f.inbox.data.panels[inboxPanel.message_id].expiresAt, 0);
-    const lastEdit = f.calls.filter(c => c.method === 'editMessageText' && c.params.message_id === inboxPanel.message_id).at(-1);
+    const lastEdit = f.calls.filter(c => c.method.startsWith('editMessage') && c.params.message_id === inboxPanel.message_id).at(-1);
+    assert.equal(lastEdit.method, 'editMessageReplyMarkup');
     assert.deepEqual(lastEdit.params.reply_markup.inline_keyboard, []);
-    assert.match(lastEdit.params.text, /panel is closed/);
     const sent = f.sent.length;
     await f.assistant.controls.show('attention:0', inboxPanel);
     await f.assistant.controls.flush();
@@ -1531,7 +1598,7 @@ test('Details retain original reply routes while menus can never become mutable 
     await f.say('Change the original', details.message_id); await f.assistant.serial;
     assert.equal(f.submissions[0].id, 'original');
     assert.match(f.submissions[0].text, /Change the original/);
-    assert.ok([original, details].every(m => f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === m.message_id)),
+    assert.ok([original, details].every(m => f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === m.message_id)),
       'a confirmed reply clears both the original and the Details copy');
     await f.say('Unknown old menu', 9999); await f.assistant.serial;
     assert.equal(f.submissions.length, 1); assert.equal(f.native.length, 0);
@@ -1715,7 +1782,8 @@ test('an uncertain native answer is retained through restart instead of deleted 
     assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, 0);
     f.inbox.recoverBridge(); await f.assistant.controls.flush();
     assert.equal(f.calls.filter(c => c.method === 'deleteMessage').length, 0);
-    assert.ok(f.calls.some(c => c.method === 'editMessageText' && /expired/.test(c.params.text)));
+    assert.ok(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.message_id === message.message.message_id &&
+      c.params.reply_markup.inline_keyboard.length === 0));
   } finally { f.cleanup(); }
 });
 
@@ -1733,7 +1801,7 @@ test('confirmed replies dismiss only their exact bridge result for workers, stee
       f.store.data.selectedProjectId = 'b';
       await f.say('Test follow-up', message.message_id); await f.assistant.serial;
       assert.equal(Boolean(first.replySentAt), mode !== 'uncertain');
-      assert.equal(f.calls.some(c => c.method === 'deleteMessage' && c.params.message_id === message.message_id), mode !== 'uncertain');
+      assert.equal(f.calls.some(c => c.method === 'editMessageReplyMarkup' && c.params.reply_markup.inline_keyboard.length === 0 && c.params.message_id === message.message_id), mode !== 'uncertain');
       assert.ok(f.inbox.list('updates').includes(other));
       assert.equal(f.store.data.selectedProjectId, 'b');
     } finally { f.cleanup(); }

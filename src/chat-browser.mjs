@@ -145,7 +145,7 @@ export class ChatBrowser {
       panel?.view === menu.view && !panel.dismissedAt && Date.now() < menu.expires && menu.actions[Number(match[2])];
     if (!action) return this.a.controls.confirm(q, 'This chat menu expired. Open Projects again.');
     this.menu = undefined;
-    try { await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id }); } catch {}
+    this.a.controls.acknowledge(q);
     return action(q.message);
   }
 }

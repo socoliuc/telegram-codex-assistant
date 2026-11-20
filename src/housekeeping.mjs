@@ -20,8 +20,8 @@ export class Housekeeping {
     Object.assign(this.records[id], metadata);
     this.c.store.save();
   }
-  trackReply(message, inboxId, autoClear = true) {
-    this.record(message, 'reply', { delivery: 'pending', ...(inboxId ? { inboxId } : {}), autoClear });
+  trackReply(message, inboxId) {
+    this.record(message, 'reply', { delivery: 'pending', ...(inboxId ? { inboxId } : {}) });
   }
   submitted(id) {
     const record = this.records[String(id)];
@@ -49,29 +49,30 @@ export class Housekeeping {
       message => this.record(message, 'help', clearAfterMs ? { clearAfter: this.c.inbox.now() + clearAfterMs } : {}), { silent: true });
   }
   candidates() {
-    return Object.entries(this.records).filter(([id, item]) => !item.dismissedAt && !this.protected(id) && this.ready(item)).map(([id]) => id);
+    return Object.entries(this.records).filter(([id, item]) => item.kind === 'help' && !item.dismissedAt && !this.protected(id)).map(([id]) => id);
   }
-  queue(ids) {
+  queue(ids, { deleteRequested = false, allowOwnerMessage = false } = {}) {
     let count = 0;
     for (const id of ids) {
       const item = this.records[id];
-      if (!item || item.dismissedAt || this.protected(id) || !this.ready(item)) continue;
-      item.dismissedAt = this.c.inbox.now(); item.cleanup = { sentAt: item.sentAt }; count++;
+      if (!item || item.dismissedAt || (!allowOwnerMessage && item.kind !== 'help') || this.protected(id) || !this.ready(item)) continue;
+      item.dismissedAt = this.c.inbox.now(); item.cleanup = { sentAt: item.sentAt, deleteRequested }; count++;
     }
     this.c.store.save(); return count;
   }
-  async dismiss(id) {
+  async dismiss(id, allowOwnerMessage = false) {
     id = String(id);
     if (!this.records[id] || this.protected(id) || !this.ready(this.records[id])) return false;
-    this.queue([id]); await this.clean(id); return true;
+    if (this.records[id].kind !== 'help' && !allowOwnerMessage) return false;
+    this.queue([id], { deleteRequested: true, allowOwnerMessage }); await this.clean(id); return true;
   }
   async dismissMessage(message) {
     const id = String(message?.message_id);
     // An explicit owner reply supplies the real ID of an older, untracked
     // message. Never infer IDs from gaps or adopt forwarded/foreign content.
     if (!this.records[id] && isOwner(message, this.c.store.data.owner))
-      this.record(message, 'reply', { delivery: 'submitted', autoClear: false });
-    return this.dismiss(id);
+      this.record(message, 'reply', { delivery: 'submitted' });
+    return this.dismiss(id, true);
   }
   clean(id) {
     if (this.protected(id)) return Promise.resolve(0);
@@ -83,8 +84,7 @@ export class Housekeeping {
     let count = 0;
     for (const [id, item] of Object.entries(this.records)) {
       if (count >= limit) break;
-      if (!item.dismissedAt && this.ready(item) &&
-          ((item.kind === 'reply' && item.autoClear) || (item.clearAfter && item.clearAfter <= this.c.inbox.now()))) this.queue([id]);
+      if (!item.dismissedAt && item.kind === 'help' && item.clearAfter && item.clearAfter <= this.c.inbox.now()) this.queue([id]);
       if (item.dismissedAt) count += await this.clean(id);
     }
     return count;
