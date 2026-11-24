@@ -121,7 +121,7 @@ export class DesktopMonitor {
           if (!final && turn.status === 'completed') continue;
           const label = `${project?.name || 'General'} · ${thread.title || '(untitled)'}`;
           submission.resultTurnId = turn.id;
-          const route = { threadId: id, hostId: 'local', turnId: turn.id, direct: true, label,
+          const route = { threadId: id, hostId: 'local', turnId: turn.id, direct: true, label, telegramReplyTo: submission.telegramReplyTo,
             projectId: project?.id || null, kind: turn.status === 'completed' ? 'completion' : 'failure',
             origin: { cwd: thread.cwd, projectId: thread.projectId || null },
             imageRoots: [thread.cwd, ...(project?.roots || [])].filter(Boolean), context: final?.slice(0, 1800) || '' };
@@ -299,7 +299,9 @@ export class DesktopMonitor {
           const observed = previous?.turnIds?.includes(turn.id);
           const sourceAt = Number(turn.completedAt) > 0 ? Number(turn.completedAt) * 1000 : undefined;
           const newTurn = Number(turn.startedAt)*1000 >= Date.parse(watch.enabledAt) || observed || events.some(e=>e.sessionId===row.id && e.turnId===turn.id);
-          const base = { threadId: thread.id, hostId, turnId: turn.id, projectId: project?.id || null, label, direct: this.isRequestedResult(thread.id, turn),
+          const request = this.requestForTurn(thread.id, turn);
+          const base = { threadId: thread.id, hostId, turnId: turn.id, projectId: project?.id || null, label,
+            direct: Boolean(request), telegramReplyTo: request?.telegramReplyTo,
             origin: { cwd: thread.cwd, projectId: thread.projectId || null }, imageRoots: [thread.cwd, ...(project?.roots || [])].filter(Boolean) };
           const lastQuestion = (turn.items || []).findLastIndex(i=>isQuestion(i) && !isAnswered(i, answered));
           const lastFinal = (turn.items || []).findLastIndex(i=>i.type==='agentMessage' && [undefined,null,'final_answer'].includes(i.phase) && !isQuestion(i) && i.text);
@@ -329,9 +331,8 @@ export class DesktopMonitor {
             if (!final && turn.status === 'completed') continue;
             const question = turn.id === data.turns[0]?.id && turn.status === 'completed' && /\?["'”’*_)]*\s*$/u.test(final);
             const title = question ? 'has a question for you' : turn.status === 'completed' ? 'has an update' : turn.status;
-            const direct = this.isRequestedResult(thread.id, turn);
             const continuedBy = turn.status === 'completed' && !question && continuationAfter(turn, data.turns);
-            const notification = await this.notice(`${hostId}:${thread.id}:${turn.id}:terminal`, `${label} — ${title}\n\n${final || 'Codex did not return a final summary.'}\n\nReply here to continue.`, { ...base, direct, kind: question?'input':turn.status==='completed'?'completion':'failure', context: final.slice(0,1800) }, seen, !continuedBy, { sourceAt, imageSource: final });
+            const notification = await this.notice(`${hostId}:${thread.id}:${turn.id}:terminal`, `${label} — ${title}\n\n${final || 'Codex did not return a final summary.'}\n\nReply here to continue.`, { ...base, kind: question?'input':turn.status==='completed'?'completion':'failure', context: final.slice(0,1800) }, seen, !continuedBy, { sourceAt, imageSource: final });
             if (continuedBy && notification?.kind === 'completion' && isOpen(notification)) {
               notification.continuedByTurnId = continuedBy;
               this.inbox.resolve(notification, 'Continued in Codex.');
@@ -347,8 +348,10 @@ export class DesktopMonitor {
           const signature = `${current.id}:${approval?'approval':'input'}:${item?.id || ''}`;
           if (previous?.waiting?.signature !== signature || (event && previous?.waiting?.eventId !== event.id)) waitingGeneration++;
           waiting = { signature, eventId:event?.id || previous?.waiting?.eventId || null };
+          const request = this.requestForTurn(thread.id, current);
           await this.notice(`${hostId}:${thread.id}:${current.id}:waiting:${approval?'approval':'input'}:${waitingGeneration}`, `${label} — needs your ${approval?'approval':'input'}\n\n${approval ? 'A native approval is waiting in Codex. A Telegram text reply does not grant that permission.' : 'Codex is waiting for your input.'}\nReply here to send instructions to this exact conversation. A native approval/input form may still need attention in the desktop app.`,
-            { threadId:thread.id, hostId, turnId:current.id, projectId:project?.id || null, label, direct:this.isRequestedResult(thread.id, current), kind:approval?'approval':'input', nativeWaiting: true, context:'Native Codex input/approval request' }, seen);
+            { threadId:thread.id, hostId, turnId:current.id, projectId:project?.id || null, label, direct: Boolean(request),
+              telegramReplyTo: request?.telegramReplyTo, kind:approval?'approval':'input', nativeWaiting: true, context:'Native Codex input/approval request' }, seen);
         }
         this.inbox.reconcileDesktop(thread.id, seen, data.turns);
         watch.threads[row.id] = { updatedAt: row.updatedAt, status: row.status, checkedAt: this.now(), pollCursor: poll.cursor, latestTurnId: latest?.id,
@@ -367,19 +370,19 @@ export class DesktopMonitor {
     const id = 'desktop:' + key;
     return Boolean(this.store.data.notices[id]) || Object.values(this.inbox.data.items).some(item => item.key === id);
   }
-  isRequestedResult(threadId, turn) {
-    let direct = false;
+  requestForTurn(threadId, turn) {
+    let request;
     for (const submission of Object.values(this.store.data.desktopSubmissions)) {
       if (submission.threadId !== threadId) continue;
-      if (submission.resultTurnId === turn.id) { direct = true; continue; }
+      if (submission.resultTurnId === turn.id) { request = submission; continue; }
       if (submission.resultTurnId || !submission.requestMarker) continue;
       // A follow-up may be queued behind existing work. Only the turn containing
       // our actual user input is its answer; timestamps cannot prove ownership.
       if (containsRequest(turn, submission.requestMarker)) {
-        submission.resultTurnId = turn.id; direct = true;
+        submission.resultTurnId = turn.id; request = submission;
       }
     }
-    return direct;
+    return request;
   }
   async notice(key, text, route, seen, deliver = true, choices = {}) {
     const id = 'desktop:' + key;
@@ -407,7 +410,8 @@ export class DesktopMonitor {
     this.store.save();
     return item;
   }
-  async reply(route, text, updateId, images = [], choice) {
+  async reply(route, text, updateId, images = [], { telegramReplyTo, ...answer } = {}) {
+    const choice = answer.questionIndex === undefined ? undefined : answer;
     const id = String(updateId);
     if (this.store.data.desktopSubmissions[id]) throw new Error('This reply was already submitted or has an unknown outcome; inspect the original Codex conversation.');
     if (!route?.threadId || route.hostId !== 'local') throw new Error('The original conversation route is unavailable.');
@@ -467,7 +471,8 @@ export class DesktopMonitor {
     // Share the submission guard with free-text answers. A queued or uncertain
     // text reply may leave the original native question visible for a while.
     if (item && route.kind === 'input') item.answerSubmissionId = id;
-    this.store.data.desktopSubmissions[id] = { threadId:route.threadId, status:'sending', at:new Date().toISOString(), requestMarker }; this.store.save();
+    this.store.data.desktopSubmissions[id] = { threadId:route.threadId, status:'sending', at:new Date().toISOString(), requestMarker,
+      ...(telegramReplyTo ? { telegramReplyTo } : {}) }; this.store.save();
     try {
       const prompt = route.kind === 'chat' ? `${requestMarker} in this conversation:\n\n${text}` :
         `${requestMarker} to this earlier ${route.kind} from this conversation:\n<quoted_context>\n${route.context || ''}\n</quoted_context>\n\nHis new message:\n${text}`;

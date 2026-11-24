@@ -78,7 +78,11 @@ test('Telegram suppresses token-bearing upstream errors and does not retry uncer
 
 test('Telegram confirms each delivered chunk before attempting the next', async () => {
   let calls = 0;
-  const server = createServer((req, res) => {
+  const replies = [];
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    replies.push(JSON.parse(Buffer.concat(chunks)).reply_parameters);
     calls++;
     res.writeHead(calls === 1 ? 200 : 500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(calls === 1 ? { ok: true, result: { message_id: 42 } } : { ok: false, error_code: 500 }));
@@ -87,8 +91,9 @@ test('Telegram confirms each delivered chunk before attempting the next', async 
   const tg = new Telegram('test', { baseUrl: `http://127.0.0.1:${server.address().port}` });
   const delivered = [];
   try {
-    await assert.rejects(tg.send(1, 'x'.repeat(9000), undefined, m => delivered.push(m.message_id)), /500/);
+    await assert.rejects(tg.send(1, 'x'.repeat(9000), undefined, m => delivered.push(m.message_id), { replyTo: 12 }), /500/);
     assert.deepEqual(delivered, [42]);
+    assert.deepEqual(replies, [12, 42].map(message_id => ({ message_id, allow_sending_without_reply: true })));
     assert.equal(calls, 2);
   } finally { server.close(); }
 });

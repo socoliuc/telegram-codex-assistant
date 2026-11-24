@@ -125,20 +125,7 @@ try {
   });
   eventWatcher.on('error', () => eventWatcher.close()); // Periodic refresh remains available.
   publishHealth();
-  if (store.data.owner) {
-    // Add commands only to the paired owner's private chat. A failed menu
-    // refresh must not prevent the listener from starting or replay work.
-    telegram.call('setMyCommands', { scope: { type: 'chat', chat_id: store.data.owner.chatId }, commands: [
-      { command: 'menu', description: 'Home' },
-      { command: 'chats', description: 'Browse projects and Codex chats' },
-      { command: 'general', description: 'Open General and show cleanup' },
-      { command: 'inbox', description: 'Answer questions and review requests' },
-      { command: 'project', description: 'Set routing or use Auto' },
-      { command: 'status', description: 'See running work' },
-      { command: 'updates', description: 'Read recent updates' }
-    ] }).catch(()=>{});
-    telegram.call('setChatMenuButton', { chat_id: store.data.owner.chatId, menu_button: { type: 'commands' } }).catch(()=>{});
-  }
+  void assistant.registerMenu();
   watcher = setInterval(() => {
     if (stopRequested()) { stop().catch(() => {}); return; }
     if (store.data.owner && existsSync(join(local, 'pairing.json'))) unlinkSync(join(local, 'pairing.json'));
@@ -152,7 +139,7 @@ try {
     if (stopRequested()) { await stop(); break; }
     try {
       const updates = await telegram.call('getUpdates', { offset: store.data.offset, timeout: 25,
-        allowed_updates: ['message', 'callback_query'] });
+        allowed_updates: ['message', 'edited_message', 'callback_query'] });
       backoff = 1000;
       for (const update of updates) {
         if (stopping || stopRequested()) { await stop(); break; }

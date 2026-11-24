@@ -146,6 +146,21 @@ export class Assistant {
     await this.controls.notify(item, keyboard, onDelivered);
     return item;
   }
+  async registerMenu() {
+    const chatId = this.store.data.owner?.chatId;
+    if (!chatId) return;
+    await Promise.allSettled([
+      this.telegram.call('setMyCommands', { scope: { type: 'chat', chat_id: chatId }, commands: [
+        { command: 'menu', description: 'Main menu' },
+        { command: 'clear_chat', description: 'Clear recent messages' },
+        { command: 'chats', description: 'Open a Codex chat' },
+        { command: 'general', description: 'Chat in General' },
+        { command: 'inbox', description: 'Open questions and requests' },
+        { command: 'updates', description: 'Read recent updates' }
+      ] }),
+      this.telegram.call('setChatMenuButton', { chat_id: chatId, menu_button: { type: 'commands' } })
+    ]);
+  }
   markDisconnected() {
     let changed = false;
     for (const jobId of this.active.values()) {
@@ -283,7 +298,7 @@ export class Assistant {
       return forked.thread.id;
     }
   }
-  async coordinate(text, projectId = null, images = [], routing = null) {
+  async coordinate(text, projectId = null, images = [], routing = null, telegramReplyTo) {
     this.assertRunning();
     const requestedText = text;
     text += '\n\nCurrent Telegram connection capabilities: ' + imageCapabilities + ' These supersede older capability statements in saved history.';
@@ -311,7 +326,7 @@ export class Assistant {
         ![...this.pending.values()].some(p => p.jobId === j.id))) {
       await this.waitForTurn(conflicts[0]);
       this.assertRunning();
-      return this.coordinate(requestedText, projectId, images, routing);
+      return this.coordinate(requestedText, projectId, images, routing, telegramReplyTo);
     }
     const conflict = conflicts[0];
     if (runningId) {
@@ -320,14 +335,14 @@ export class Assistant {
         if (this.fullAccess && running.executionMode !== (conflict ? 'read-only-control' : undefined)) {
           await this.waitForTurn(running);
           this.assertRunning();
-          return this.coordinate(requestedText, projectId, images, routing);
+          return this.coordinate(requestedText, projectId, images, routing, telegramReplyTo);
         }
         if (images.length) {
           running.images = [...new Set([...(running.images || []), ...images])];
           this.store.save();
         }
         if (routing) routing.submissionAttempted = true;
-        await this.rpc.call('turn/steer', { threadId, expectedTurnId: running.turnId, input: input(text, images) });
+        await this.steer(running, text, images, telegramReplyTo);
         return;
       }
       throw new Error('Assistant is starting or needs recovery. Try /status first.');
@@ -335,12 +350,21 @@ export class Assistant {
     if (conflict) text += `\n\nTemporary read-only control turn: ${conflict.project} has ${conflict.status} work in overlapping folders. You can discuss, inspect or stop requested jobs, but do not modify files or start overlapping work until it finishes or is inspected. The native sandbox for this turn is read-only.`;
     return this.startTurn({ project: project ? `${project.name} discussion` : 'Assistant', roots: conflict ? [] : roots,
       imageRoots: project?.roots || [this.assistantRoot],
-      threadId, prompt: text, images, scopeProjectId: projectId, executionMode: conflict ? 'read-only-control' : undefined, routing });
+      threadId, prompt: text, images, scopeProjectId: projectId, executionMode: conflict ? 'read-only-control' : undefined,
+      routing, telegramReplyTo });
   }
-  async startTurn({ project, roots, imageRoots = roots, threadId, prompt, images = [], projectId, scopeProjectId, executionMode, routing }) {
+  async steer(job, text, images, telegramReplyTo) {
+    await this.rpc.call('turn/steer', { threadId: job.threadId, expectedTurnId: job.turnId, input: input(text, images) });
+    if (telegramReplyTo) {
+      job.telegramReplyTo = telegramReplyTo;
+      this.store.save();
+    }
+  }
+  async startTurn({ project, roots, imageRoots = roots, threadId, prompt, images = [], projectId, scopeProjectId, executionMode, routing, telegramReplyTo }) {
     this.assertRunning();
     const id = randomBytes(4).toString('hex');
-    const job = { id, project, projectId, scopeProjectId, roots, imageRoots, threadId, images, executionMode, status: 'dispatching', createdAt: new Date().toISOString() };
+    const job = { id, project, projectId, scopeProjectId, roots, imageRoots, threadId, images, executionMode, telegramReplyTo,
+      status: 'dispatching', createdAt: new Date().toISOString() };
     this.store.data.jobs[id] = job;
     this.active.set(threadId, id);
     this.store.save();
@@ -363,9 +387,11 @@ export class Assistant {
       throw e;
     }
   }
-  async dispatch(query, prompt, requesterThreadId, images) {
+  async dispatch(query, prompt, requesterThreadId, images, telegramReplyTo) {
     this.assertRunning();
-    images ??= this.store.data.jobs[this.active.get(requesterThreadId)]?.images || [];
+    const requester = this.store.data.jobs[this.active.get(requesterThreadId)];
+    images ??= requester?.images || [];
+    telegramReplyTo ??= requester?.telegramReplyTo;
     const snapshot = await this.refreshContext();
     this.assertRunning();
     if (snapshot?.status === 'stale') throw new Error('I cannot refresh the project context right now. I have not started new project work.');
@@ -412,7 +438,7 @@ export class Assistant {
     // Release reservation and create the durable dispatch record synchronously.
     delete this.store.data.jobs[reservationId];
     if (this.stopping) { this.store.save(); this.assertRunning(); }
-    return this.startTurn({ project: project.name, projectId: project.id, roots: project.roots, threadId, prompt, images });
+    return this.startTurn({ project: project.name, projectId: project.id, roots: project.roots, threadId, prompt, images, telegramReplyTo });
   }
   async stop(jobId) {
     const job = this.store.data.jobs[jobId];
@@ -603,6 +629,7 @@ export class Assistant {
   async callback(q) {
     const ownerMessage = { ...q.message, from: q.from };
     if (!isOwner(ownerMessage, this.store.data.owner)) return;
+    if (q.message?.date > 0 && this.controls.isBotMessage(q.message) && this.controls.history.record(q.message)) this.store.save();
     if (String(q.data).startsWith('ctl:')) return this.controls.callback(q);
     if (String(q.data).startsWith('route:')) return this.chooseMessageRoute(q);
     if (String(q.data).startsWith('project:')) return this.selectProject(q);
@@ -631,16 +658,16 @@ export class Assistant {
         secrets: [this.telegram.token] });
     } catch { route = { choices: [], unavailable: true }; }
     this.assertRunning();
-    if (!route.choices) return this.coordinate(text, route.projectId, images, {});
+    if (!route.choices) return this.coordinate(text, route.projectId, images, {}, messageId);
     const pending = this.store.data.messageRoutes ||= {};
     const key = randomBytes(8).toString('hex');
     const options = [null, ...this.projects.map(p => p.id)];
     const record = pending[key] = { protectedText: protectMessage(text), images, messageId, options, shortlist: route.choices,
       expiresAt: Date.now() + 60 * 60_000 };
     this.store.save();
-    await this.send((route.unavailable ? 'Auto is unavailable. Choose a destination' : 'Which project is this for?') +
-      '\n\n' + redact(text, [this.telegram.token]).slice(0, 160) + '\n\nThis choice applies to this message only.', undefined, routeKeyboard(key, record, this.projects, [this.telegram.token]),
-      m => { record.panelId = m.message_id; this.store.save(); });
+    await this.send(route.unavailable ? 'Auto is unavailable. Where should I send this message?' : 'Where should I send this message?',
+      undefined, routeKeyboard(key, record, this.projects, [this.telegram.token]),
+      m => { record.panelId = m.message_id; this.store.save(); }, { replyTo: messageId });
     return 'awaiting-route';
   }
   async chooseMessageRoute(q) {
@@ -677,7 +704,7 @@ export class Assistant {
         if (record.expiresAt <= Date.now()) {
           this.controls.housekeeping.endUnsent(record.messageId, 'expired'); return finish('Choice expired');
         }
-        await this.coordinate(original, projectId, record.images, record);
+        await this.coordinate(original, projectId, record.images, record, record.messageId);
         this.controls.housekeeping.submitted(record.messageId);
         await finish('Selected ' + label);
       }).catch(async error => {
@@ -742,25 +769,30 @@ export class Assistant {
   async handleUpdate(update) {
     if (!claimUpdate(this.store, update.update_id)) return;
     if (update.callback_query) return this.callback(update.callback_query);
-    const m = update.message;
+    const m = update.message || update.edited_message;
     if (!m?.from || m.chat?.type !== 'private' || m.from.is_bot || m.sender_chat) return;
     const forwarded = m.forward_origin || m.forward_from;
     let text = m.text?.trim();
     if (!this.store.data.owner) {
-      if (forwarded) return;
+      if (forwarded || update.edited_message) return;
       const code = text?.match(/^\/(?:pair|start)\s+(\S+)$/)?.[1];
       if (!this.pairCode || code !== this.pairCode) return;
       this.store.data.owner = { userId: m.from.id, chatId: m.chat.id };
       this.pairCode = undefined;
       this.controls.history.record(m);
       this.store.save();
+      void this.registerMenu();
       await this.send('Connected. Tell me what you would like to work on, or ask me what is happening with a project.');
       return;
     }
     if (!isOwnerChat(m, this.store.data.owner)) return;
     this.controls.history.record(m);
+    const quoted = m.reply_to_message;
+    if (quoted?.date > 0 && (isOwner(quoted, this.store.data.owner) || this.controls.isBotMessage(quoted))) {
+      this.controls.history.record(quoted);
+    }
     this.store.save();
-    if (forwarded) return;
+    if (forwarded || update.edited_message) return;
     const image = telegramImage(m);
     if (image) text = m.caption?.trim() || 'Describe this image and read any visible text. If it refers to our current task, explain what you can observe.';
     if (!text) { await this.controls.help('You can send me text, a photo, or a JPEG/PNG/WebP image up to 20 MB. I can’t read voice notes or other files yet.'); return; }
@@ -768,6 +800,10 @@ export class Assistant {
       this.controls.housekeeping.record(m, 'command');
       if (!await this.controls.dismissPanel(m.reply_to_message) && !await this.controls.housekeeping.dismissMessage(m.reply_to_message))
         await this.controls.help('Reply with /dismiss to a menu, notice or older message you sent, or open /cleanup. Pending replies stay until delivery is confirmed.');
+      return;
+    }
+    if (!image && /^\/clear_chat(?:@\w+)?$/.test(text)) {
+      await this.controls.clearChat(undefined, m.message_id);
       return;
     }
     const command = !image && text.match(/^\/(menu|help|start|inbox|settings|connection|updates|project|projects|chats|general|status|cleanup)(?:@\w+)?$/)?.[1];
@@ -789,7 +825,7 @@ export class Assistant {
         await this.controls.help('I could not confirm which reply card opened. Tap Open & reply again or Home, then resend your message.');
         return;
       }
-      const selectedItem = Object.values(this.controls.inbox.data.items).find(item => item.notificationMessages?.[pendingReply]);
+      const selectedItem = this.controls.pendingReplyItem();
       if (selectedItem?.kind === 'input' && !isVisible(selectedItem)) {
         await this.controls.help('That question has closed. Tap Home for a new message, or open another task to reply.');
         return;
@@ -826,13 +862,16 @@ export class Assistant {
         if (!this.desktop) throw new Error('Desktop connection is unavailable. Your reply was not sent to another conversation.');
         const images = image ? [await this.telegram.downloadImage(image, join(this.assistantRoot, '.local', 'media'))] : [];
         this.assertRunning();
-        const result = await this.desktop.reply(desktopRoute,text,update.update_id,images);
+        const result = await this.desktop.reply(desktopRoute, text, update.update_id, images, { telegramReplyTo: m.message_id });
         this.controls.housekeeping.submitted(m.message_id);
         const notification = this.controls.inbox.get(desktopRoute.inboxId);
         if (notification) await this.controls.refreshChoiceMarkup(notification);
         await this.controls.refreshClosedInboxPanels();
-        const label = notification && this.controls.forDisplay(notification).displayLabel;
-        await this.controls.receipt(`${result.status === 'queued' ? 'Queued' : 'Sent'} your reply to ${label || desktopRoute.label || 'the original Codex conversation'}.`);
+        if (result.status === 'queued') {
+          const label = notification && this.controls.forDisplay(notification).displayLabel;
+          await this.send(`Queued in ${label || desktopRoute.label || 'the Codex chat'}.`, undefined, undefined, undefined,
+            { silent: true, replyTo: m.message_id });
+        }
         await this.controls.flushCleanup();
       }).catch(async error=>{try{await this.send(`Your reply could not be confirmed: ${redact(error.message,[this.telegram.token])}\nInspect the original Codex conversation before retrying. Nothing was rerouted.`);}catch{}});
       return;
@@ -861,11 +900,12 @@ export class Assistant {
       this.assertRunning();
       if (replyJob?.projectId) {
         if (['running', 'awaiting_approval'].includes(replyJob.status))
-          await this.rpc.call('turn/steer', { threadId: replyJob.threadId, expectedTurnId: replyJob.turnId, input: input(text, images) });
-        else await this.dispatch(replyJob.projectId, text, undefined, images);
+          await this.steer(replyJob, text, images, m.message_id);
+        else await this.dispatch(replyJob.projectId, text, undefined, images, m.message_id);
       } else if (!replyJob && !selectedProjectId && !generalDestination) {
         if (await this.routeFreshMessage(text, images, m.message_id) === 'awaiting-route') return;
-      } else await this.coordinate(text, replyJob ? (replyJob.scopeProjectId || this.coordinatorProject(replyJob.threadId)) : selectedProjectId, images);
+      } else await this.coordinate(text, replyJob ? (replyJob.scopeProjectId || this.coordinatorProject(replyJob.threadId)) : selectedProjectId,
+        images, null, m.message_id);
       this.controls.housekeeping.submitted(m.message_id);
       if (replyJob) await this.controls.markBridgeReplySent(replyId);
       if (replyJob) await this.controls.flushCleanup();

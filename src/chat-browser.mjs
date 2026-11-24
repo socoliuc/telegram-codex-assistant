@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { redact } from './core.mjs';
 import { projectForChat } from './projects.mjs';
 
-const home = { text: '⌂', callback_data: 'ctl:home' };
+const home = { text: 'Home', callback_data: 'ctl:home' };
 const pageSize = 6;
 const chatDate = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
@@ -28,7 +28,7 @@ export class ChatBrowser {
       const index = callbacks.push(run) - 1;
       return { text: label, callback_data: `browse:${nonce}:${index}` };
     };
-    const backButton = back && action('←', back), nextButton = next && action('→', next);
+    const backButton = back && action('Back', back), nextButton = next && action('Next', next);
     const rows = actions.map(({ label, run }) => [action(label, run)]);
     rows.push([backButton, home, nextButton].filter(Boolean));
     const id = await this.a.controls.panel(text, { inline_keyboard: rows }, message, view);
@@ -42,7 +42,7 @@ export class ChatBrowser {
     const page = Math.min(requestedPage, pages - 1);
     const actions = projects.slice(page * pageSize, (page + 1) * pageSize)
       .map(project => ({ label: this.safe(project.name, 70), run: msg => this.list(project.id, msg, page) }));
-    return this.panel(`Projects${pages > 1 ? ` · ${page + 1}/${pages}` : ''}\n\nChoose a project to see its Codex chats.`,
+    return this.panel(`Chats${pages > 1 ? ` · ${page + 1}/${pages}` : ''}\n\nChoose a project.`,
       message, 'browse', actions, {
         back: page > 0 ? msg => this.projects(msg, page - 1) : undefined,
         next: page + 1 < pages ? msg => this.projects(msg, page + 1) : undefined
@@ -69,11 +69,11 @@ export class ChatBrowser {
       .map(thread => {
         const updated = updatedLabel(thread.updatedAt);
         return { label: this.safe(thread.name || thread.title || thread.preview || 'Untitled chat', updated ? 50 : 72) +
-          (updated ? ' · ' + updated : ''), run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier) };
+          (updated ? ' · ' + updated : ''), run: msg => this.openChat(projectId, thread, msg, projectPage, cursor, earlier) };
       });
     const hasChats = actions.length > 0;
-    actions.push({ label: 'Telegram project chat', run: msg => this.selectProject(projectId, msg) });
-    return this.panel(`${this.safe(project.name, 100)} · Chats\n\n${hasChats ? 'Choose a chat to preview it.' : 'No desktop chats on this page.'}`,
+    actions.push({ label: 'Message the project', run: msg => this.selectProject(projectId, msg) });
+    return this.panel(`${this.safe(project.name, 100)} · Chats\n\n${hasChats ? 'Choose a chat to continue it.' : 'No desktop chats on this page.'}`,
       message, 'chat-list', actions, { back,
         next: page.nextCursor ? msg => this.list(projectId, msg, projectPage, page.nextCursor, [...earlier, cursor]) : undefined
       });
@@ -85,7 +85,7 @@ export class ChatBrowser {
     this.a.store.save();
     return this.a.controls.open('home', message);
   }
-  async preview(projectId, thread, message, projectPage, cursor, earlier, active = false) {
+  async openChat(projectId, thread, message, projectPage, cursor, earlier, previousTranscript) {
     const project = this.a.projects.find(p => p.id === projectId);
     if (!project) return this.projects(message);
     const back = msg => {
@@ -96,6 +96,7 @@ export class ChatBrowser {
       return this.list(projectId, msg, projectPage, cursor, earlier);
     };
     const title = this.safe(thread.name || thread.title || thread.preview || 'Untitled chat', 100);
+    const prompt = 'Type below to message this chat.';
     let history;
     try {
       history = await this.a.desktop?.tools.read(thread.id, 'local', { turnLimit: 3 });
@@ -103,9 +104,11 @@ export class ChatBrowser {
           projectForChat(this.a.projects, history.thread.cwd, history.thread.projectId)?.id !== projectId ||
           this.a.desktop.excludeThreadIds().includes(thread.id)) throw new Error('Chat unavailable');
     } catch {
-      const retry = { label: 'Retry', run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier, active) };
-      return this.panel(`${this.safe(project.name, 100)}\n${title}\n\nThis chat could not be opened. Check the desktop connection and try again.`,
-        message, active ? 'chat-active' : 'chat-preview', [retry], { back });
+      const retry = { label: 'Retry', run: msg => this.openChat(projectId, thread, msg, projectPage, cursor, earlier, previousTranscript) };
+      const text = previousTranscript ?
+        previousTranscript + '\n\n' + this.a.controls.replyDestinationText(prompt) + '\n\nCould not refresh recent messages.' :
+        `${this.safe(project.name, 100)}\n${title}\n\nCould not open this chat. Tap Retry or Home.`;
+      return this.panel(text, message, 'chat-active', [retry], { back });
     }
     const label = this.safe(project.name, 100) + ' · ' + title;
     const excerpts = (history.turns || []).slice(0, 3).reverse().flatMap(({ items = [] }) => {
@@ -117,22 +120,13 @@ export class ChatBrowser {
     });
     const body = excerpts.length ? 'Recent messages\n\n' + excerpts.join('\n\n') : 'This chat has no recent text to preview.';
     const updated = updatedLabel(history.thread.updatedAt || thread.updatedAt);
-    const preview = label + (updated ? '\nUpdated ' + updated : '') + '\n\n' + body;
-    const refresh = { label: '↻ Refresh', run: msg => this.preview(projectId, thread, msg, projectPage, cursor, earlier, true) };
-    if (active) return this.activePanel(preview, message, refresh, back);
-    const route = { threadId: thread.id, hostId: 'local', kind: 'chat', projectId, label };
-    const enter = { label: 'Message here', run: msg => this.activate(route, preview, msg, refresh, back) };
-    return this.panel(preview, message, 'chat-preview', [enter], { back });
-  }
-  activePanel(preview, message, refresh, back) {
-    return this.panel(preview + '\n\nType a message below. It goes directly to this Codex chat until you leave.',
-      message, 'chat-active', [refresh], { back });
-  }
-  async activate(route, preview, message, refresh, back) {
-    const id = await this.activePanel(preview, message, refresh, back);
-    if (id) {
+    const transcript = label + (updated ? '\nUpdated ' + updated : '') + '\n\n' + body;
+    const destination = previousTranscript ? this.a.controls.replyDestinationText(prompt) : prompt;
+    const refresh = { label: 'Refresh', run: msg => this.openChat(projectId, thread, msg, projectPage, cursor, earlier, transcript) };
+    const id = await this.panel(transcript + '\n\n' + destination, message, 'chat-active', [refresh], { back });
+    if (!previousTranscript && id && !this.a.controls.inbox.data.panels[id]?.dismissedAt) {
       this.a.controls.clearReplyDestination();
-      this.data.activeChat = { ...route, panelId: id };
+      this.data.activeChat = { threadId: thread.id, hostId: 'local', kind: 'chat', projectId, label, panelId: id };
       this.a.store.save();
     }
     return id;
@@ -143,7 +137,7 @@ export class ChatBrowser {
     const panel = this.a.controls.inbox.data.panels[String(q.message?.message_id)];
     const action = match && menu?.nonce === match[1] && menu.id === q.message?.message_id &&
       panel?.view === menu.view && !panel.dismissedAt && Date.now() < menu.expires && menu.actions[Number(match[2])];
-    if (!action) return this.a.controls.confirm(q, 'This chat menu expired. Open Projects again.');
+    if (!action) return this.a.controls.confirm(q, 'This chat menu expired. Open /chats again.');
     this.menu = undefined;
     this.a.controls.acknowledge(q);
     return action(q.message);

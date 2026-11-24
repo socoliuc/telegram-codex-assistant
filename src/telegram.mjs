@@ -75,11 +75,14 @@ export class Telegram {
     await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
     return path;
   }
-  async send(chatId, text, replyMarkup, onDelivered, { silent = false } = {}) {
+  async send(chatId, text, replyMarkup, onDelivered, { silent = false, replyTo } = {}) {
     const sent = [];
     for (const chunk of splitText(redact(text, [this.token]))) {
+      const parent = sent.at(-1)?.message_id || replyTo;
       const message = await this.call('sendMessage', {
         chat_id: chatId, text: chunk, link_preview_options: { is_disabled: true }, disable_notification: silent,
+        ...(Number.isSafeInteger(parent) && parent > 0 && replyTo ?
+          { reply_parameters: { message_id: parent, allow_sending_without_reply: true } } : {}),
         ...(replyMarkup ? { reply_markup: replyMarkup } : {})
       });
       sent.push(message);

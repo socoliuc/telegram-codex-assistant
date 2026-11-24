@@ -102,10 +102,11 @@ export class Inbox {
     item.snoozedUntil = this.now() + 60 * 60_000;
     item.reminder = 'pending'; this.store.save(); return true;
   }
-  review(id) {
+  review(id, { removeNotification = false } = {}) {
     const item = this.get(id);
     if (!item || ['input', 'approval'].includes(item.kind)) return false;
     item.status = 'reviewed'; item.reviewedAt = this.now(); delete item.snoozedUntil;
+    if (removeNotification) item.removeReviewedNotification = true;
     this.store.save(); return true;
   }
 }

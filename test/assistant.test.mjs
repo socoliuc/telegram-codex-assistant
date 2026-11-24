@@ -36,8 +36,8 @@ function fixture(options = {}) {
   store.data.owner = { userId: 1, chatId: 1 };
   const rpc = new NativeFixture();
   const sent = [], telegramCalls = [];
-  const telegram = { token: 'TOKEN', async send(chat, text, keyboard) {
-    sent.push({ chat, text, keyboard }); return [{ message_id: sent.length }];
+  const telegram = { token: 'TOKEN', async send(chat, text, keyboard, onDelivered, options) {
+    sent.push({ chat, text, keyboard, options }); return [{ message_id: sent.length }];
   }, async call(method, params) { telegramCalls.push({ method, params }); return true; } };
   const projects = [
     { id: 'a', name: 'A', roots: [projectA] },
@@ -49,9 +49,10 @@ function fixture(options = {}) {
   return { dir, store, rpc, sent, telegramCalls, assistant, cleanup() { assistant.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
-test('browse a Codex project, preview its exact chat, then send there until leaving for General', async () => {
+test('browse a Codex project and start chatting in one tap until leaving for General', async () => {
   const f = fixture();
   const tracker = [];
+  let readUnavailable = false;
   const message = text => ({ from: { id: 1 }, chat: { id: 1, type: 'private' }, message_id: 100, text });
   const click = async label => {
     const rows = f.telegramCalls.findLast(c => c.method === 'editMessageText')?.params.reply_markup.inline_keyboard ||
@@ -67,6 +68,7 @@ test('browse a Codex project, preview its exact chat, then send there until leav
       excludeThreadIds: () => ['managed'],
       tools: { async read(threadId, host, options) {
         tracker.push({ threadId, host, options });
+        if (readUnavailable) throw Error('Connection temporarily unavailable');
         return { thread: { id: 'chat', cwd: projectA }, turns: [{ items: [
           { type: 'userMessage', content: [{ type: 'text', text: 'A prior request' }] },
           { type: 'agentMessage', phase: 'final_answer', text: 'A prior answer' }
@@ -87,10 +89,10 @@ test('browse a Codex project, preview its exact chat, then send there until leav
     f.assistant.projects = [...Array.from({ length: 6 }, (_, i) =>
       ({ id: 'filler-' + i, name: 'Folder ' + i, roots: [] })), ...f.assistant.projects];
     await f.assistant.controls.open('browse');
-    await click('→');
+    await click('Next');
     await click('A');
-    await click('←');
-    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Projects · 2\/2/);
+    await click('Back');
+    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Chats · 2\/2/);
     await click('A');
     assert.equal(tracker.length, 0, 'listing chats must not read their histories');
     const list = f.telegramCalls.findLast(c => c.method === 'editMessageText').params;
@@ -98,25 +100,34 @@ test('browse a Codex project, preview its exact chat, then send there until leav
     const stale = await click('Homepage discussion');
     const preview = f.telegramCalls.findLast(c => c.method === 'editMessageText').params;
     assert.match(preview.text, /A · Homepage discussion[\s\S]*A prior request[\s\S]*A prior answer/);
-    assert.equal(f.store.data.activeChat, undefined);
-    await click('Message here');
     assert.equal(f.store.data.activeChat.threadId, 'chat');
     await f.assistant.handleUpdate({ update_id: 9, message: message('Follow up here') });
     await f.assistant.serial;
     assert.deepEqual(tracker[1].route.threadId, 'chat');
     assert.equal(tracker[1].text, 'Follow up here');
     assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').length, 0);
-    await click('↻ Refresh');
-    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Recent messages[\s\S]*Type a message below/);
+    const reply = f.assistant.controls.inbox.observe('selected', { source: 'desktop', kind: 'completion', label: 'Selected conversation' });
+    reply.notificationMessages = { 42: { sentAt: Date.now() } };
+    f.store.data.inbox.nextReplyMessageId = '42';
+    await click('Refresh');
+    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text, /Next reply goes to Selected conversation/);
     assert.equal(f.store.data.activeChat.threadId, 'chat');
+    assert.equal(f.store.data.inbox.nextReplyMessageId, '42');
+    readUnavailable = true;
+    await click('Refresh');
+    assert.equal(f.store.data.activeChat.threadId, 'chat', 'a failed read does not reroute a message');
+    assert.match(f.telegramCalls.findLast(c => c.method === 'editMessageText').params.text,
+      /A prior request[\s\S]*Next reply goes to Selected conversation[\s\S]*Could not refresh/);
     f.assistant.controls.housekeeping.record({ message_id: 90 }, 'help');
     f.assistant.controls.housekeeping.record({ message_id: 91 }, 'command');
-    await click('⌂');
+    await click('Home');
     await click('General');
     assert.equal(f.store.data.activeChat, undefined);
     assert.equal(f.store.data.generalDestination, true);
     assert.ok(!f.assistant.controls.housekeeping.records['90'].dismissedAt);
-    await click(/^Clear bot panels & notices · \d+$/);
+    await click('More');
+    await click('Cleanup');
+    await click(/^Clear bot notices · \d+$/);
     assert.ok(f.assistant.controls.housekeeping.records['90'].dismissedAt);
     assert.ok(!f.assistant.controls.housekeeping.records['91'].dismissedAt);
     f.assistant.classifyMessage = async () => { assert.fail('General should bypass Auto'); };
@@ -125,7 +136,7 @@ test('browse a Codex project, preview its exact chat, then send there until leav
     assert.equal(f.rpc.calls.filter(c => c.method === 'turn/start').length, 1);
     await f.assistant.callback({ id: 'stale', data: stale, from: { id: 1 },
       message: { chat: { id: 1, type: 'private' }, message_id: 1 } });
-    assert.equal(tracker.length, 3);
+    assert.equal(tracker.length, 4);
   } finally { f.cleanup(); }
 });
 
@@ -221,13 +232,14 @@ test('failed image downloads submit nothing and structured questions keep waitin
 test('coordinator delegation forwards current turn images including an image added by steering', async () => {
   const f = fixture();
   try {
-    const parent = await f.assistant.coordinate('Use this logo in A', null, ['C:\\first.png']);
+    const parent = await f.assistant.coordinate('Use this logo in A', null, ['C:\\first.png'], null, 510);
     await f.assistant.onRequest({ id: 910, method: 'item/tool/call', params: {
       threadId: parent.threadId, tool: 'dispatch_project', arguments: { project: 'A', prompt: 'Use the attached logo' }
     } });
     let turns = f.rpc.calls.filter(c => c.method === 'turn/start');
     assert.deepEqual(turns.at(-1).params.input[1], { type: 'localImage', path: 'C:\\first.png' });
-    await f.assistant.coordinate('Compare these for B', null, ['C:\\second.png']);
+    assert.equal(Object.values(f.store.data.jobs).find(job => job.projectId === 'a').telegramReplyTo, 510);
+    await f.assistant.coordinate('Compare these for B', null, ['C:\\second.png'], null, 511);
     await f.assistant.onRequest({ id: 911, method: 'item/tool/call', params: {
       threadId: parent.threadId, tool: 'dispatch_project', arguments: { project: 'B', prompt: 'Compare both images' }
     } });
@@ -235,6 +247,7 @@ test('coordinator delegation forwards current turn images including an image add
     assert.deepEqual(turns.at(-1).params.input.slice(1), [
       { type: 'localImage', path: 'C:\\first.png' }, { type: 'localImage', path: 'C:\\second.png' }
     ]);
+    assert.equal(Object.values(f.store.data.jobs).find(job => job.projectId === 'b').telegramReplyTo, 511);
   } finally { f.cleanup(); }
 });
 
@@ -296,6 +309,27 @@ test('completion sends one labeled result and preserves reply-to-job routing', a
     assert.match(f.sent[0].text, /A.*Inspection finished/s);
     assert.equal(f.store.data.replies['1'], job.id);
     assert.equal(f.store.data.jobs[job.id].status, 'completed');
+  } finally { f.cleanup(); }
+});
+
+test('a Telegram prompt gets a quoted Codex answer with a Home button', async () => {
+  const f = fixture();
+  try {
+    f.store.data.generalDestination = true;
+    await f.assistant.handleUpdate({ update_id: 12, message: {
+      message_id: 300, chat: { id: 1, type: 'private' }, from: { id: 1 }, text: 'Say hello'
+    } });
+    await f.assistant.serial;
+    const job = Object.values(f.store.data.jobs)[0];
+    await f.assistant.onNotification({ method: 'item/completed', params: { threadId: job.threadId, turnId: job.turnId,
+      item: { type: 'agentMessage', phase: 'final_answer', text: 'Hello!' } } });
+    await f.assistant.onNotification({ method: 'turn/completed', params: { threadId: job.threadId,
+      turn: { id: job.turnId, status: 'completed' } } });
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0].text, 'Hello!');
+    assert.equal(f.sent[0].options.replyTo, 300);
+    assert.deepEqual(f.sent[0].keyboard.inline_keyboard.flat().map(b => b.callback_data), ['ctl:home']);
+    assert.equal(f.store.data.replies['1'], job.id);
   } finally { f.cleanup(); }
 });
 
@@ -764,8 +798,8 @@ test('desktop notification replies use their durable exact route and reject unau
     const routed=[];f.assistant.desktop={async reply(...args){routed.push(args);return {status:'sent'};}};
     f.assistant.coordinate=async()=>assert.fail('Must not route through selected conversation');
     await f.assistant.handleUpdate(message('Edit A',202,{from:{id:2},reply_to_message:{message_id:702}}));
-    await f.assistant.handleUpdate(message('Edit A',203,{reply_to_message:{message_id:702}}));await f.assistant.serial;
-    assert.equal(routed.length,1);assert.deepEqual(routed[0],[route,'Edit A',203,[]]);
+    await f.assistant.handleUpdate(message('Edit A',203,{message_id:503,reply_to_message:{message_id:702}}));await f.assistant.serial;
+    assert.equal(routed.length,1);assert.deepEqual(routed[0],[route,'Edit A',203,[],{telegramReplyTo:503}]);
     assert.equal(f.store.data.selectedProjectId,'b');
   }finally{f.cleanup();}
 });

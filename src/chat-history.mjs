@@ -1,5 +1,5 @@
 // Telegram only returns message IDs as updates arrive. Record IDs and dates
-// so a confirmed clear never has to guess at the chat's history.
+// so clearing never has to guess at the chat's history.
 const lifetime = 48 * 60 * 60_000;
 const day = lifetime / 2;
 const removed = entry => ['deleted', 'missing'].includes(entry?.status);
@@ -21,7 +21,9 @@ export class ChatHistory {
       this.prunedAt = now;
     }
     const sentAt = message.date > 0 ? message.date * 1000 : now;
-    this.entries[id] ||= { sentAt, ...(message.dice ? { eligibleAt: sentAt + day } : {}) };
+    if (this.entries[id]) return false;
+    this.entries[id] = { sentAt, ...(message.dice ? { eligibleAt: sentAt + day } : {}) };
+    return true;
   }
   inventory() {
     const records = new Map();

@@ -9,7 +9,7 @@ Use a private Telegram chat to send work to Codex on your Mac, Linux computer, o
 ## A minute with the bot
 
 1. **Open Home.** The Inbox shows questions, approvals, and failures that need attention. Updates holds completed work.
-2. **Open a project update.** Tap **Open & reply** and type a follow-up. The bot sends that message to the conversation that produced the update.
+2. **Continue a chat.** Tap **Chats**, choose a project, and open a chat. Type below to continue it. Codex answers appear as Telegram replies to your messages.
 3. **Change the subject.** With **Auto** selected, the next plain message is routed again. A clear project request goes to that project, an ordinary question goes to General, and an ambiguous task opens a picker before work starts. Tap **Home** to cancel a reply you have yet to send.
 
 ## Choose your download
@@ -33,16 +33,17 @@ On a CLI-only installation, add your project folders to give **Auto** destinatio
 | Control | What it does |
 | --- | --- |
 | **Home** · `/menu` | Shows the current destination and cancels a pending one-message reply. |
-| **Projects** · `/chats` | Choose a project, open a Codex chat, and read its recent messages. Use **←** to go back, **⌂** for Home, and **→** for the next page. **Message here** sends new messages to that chat until you leave it. Codex replies appear automatically in Telegram. |
-| **General** · `/general` | Sends new messages to General and offers to clear recent bot panels and notices. |
+| **Chats** · `/chats` | Choose a project and tap a Codex chat to open it. Type to continue it, or tap **Back** or **Home** to leave. |
+| **General** · `/general` | Switches Home to General for new messages. |
+| **Clear chat** · `/clear_chat` | Clears recent Telegram messages from both sides in one tap and shows Home. |
 | **Inbox** · `/inbox` | Opens requests that need attention. Choose an offered answer or open a task to reply. |
 | **Routing** · `/project` | Pins a project for new messages. Select **Auto** to route each new message independently. Find Routing under **More**. |
 | **Running** · `/status` | Lists current desktop activity and work requested through Telegram. |
-| **Updates** · `/updates` | Opens recent results. **Mark reviewed** clears that item from the list. |
+| **Updates** · `/updates` | Opens recent results. **Review & clear** dismisses an update and clears its recent Telegram copies. |
 | **Open & reply** | Sends your next plain message to that card’s conversation. An explicit Telegram reply targets the message you quoted. |
 | **Connection** · `/connection` | Shows listener health, project discovery, and the freshness of the desktop connection. |
 
-Navigation and review keep your messages and results visible. **Close** removes one bot panel or notice. **Clear chat** on Home asks before removing recent messages on both sides. Telegram lets the bot clear messages it has seen from the last 48 hours. Use Telegram’s **Clear History** for anything left. Your Codex chats and Inbox tasks stay available.
+**Review & clear** also removes recent attachments. Telegram keeps older copies and the bot removes their buttons. **Close** removes one bot panel or notice. **Clear chat** is on Home and in Telegram’s command menu. Telegram lets the bot clear messages it has seen from the last 48 hours. Use Telegram’s **Clear History** for anything left. Your Codex chats and Inbox tasks stay available.
 
 ## Where your messages go
 

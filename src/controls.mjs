@@ -11,7 +11,7 @@ import { questionChoices, choiceRevision } from './choices.mjs';
 import { imageReferences, prepareImages, renderAttachedImages } from './outgoing-images.mjs';
 
 const button = (text, action) => ({ text, callback_data: 'ctl:' + action });
-const homeButton = button('⌂ Home', 'home');
+const homeButton = button('Home', 'home');
 const moreButton = button('‹ More', 'more');
 
 export const unconfirmedReply = 'awaiting-details-delivery';
@@ -79,9 +79,11 @@ export class Controls {
       message.chat?.id === this.store.data.owner.chatId && message.chat?.type === 'private' &&
       !message.forward_origin && !message.forward_from && !message.sender_chat);
   }
-  open(view = 'home', message, afterMessageId = 0) {
-    if (view === 'home' || view === 'general' || view === 'browse') this.clearReplyDestination();
-    if (this.store.data.activeChat || view === 'general') {
+  open(view = 'home', message, afterMessageId = 0, notice = '') {
+    const leavingChat = ['home', 'general', 'browse'].includes(view);
+    const previousChat = leavingChat && this.store.data.activeChat;
+    if (leavingChat) this.clearReplyDestination();
+    if (previousChat || view === 'general') {
       delete this.store.data.activeChat;
       if (view === 'general') {
         this.store.data.generalDestination = true;
@@ -94,13 +96,17 @@ export class Controls {
       const explicit = this.inbox.data.panels[String(message?.message_id)];
       let target = explicit && explicit.view !== 'digest' ? message : this.activePanel();
       if (target && this.inbox.data.panels[String(target.message_id)]?.dismissedAt) return;
+      const activeChat = this.store.data.activeChat;
+      if (activeChat && String(target?.message_id) === String(activeChat.panelId)) target = undefined;
       // Telegram edits stay at their original scroll position. A slash command
       // needs a panel below it, while inline buttons stay on the panel being used.
-      const previous = target && target.message_id < afterMessageId ? this.inbox.data.panels[String(target.message_id)] : null;
+      const previous = target && target.message_id < afterMessageId ? target.message_id : undefined;
       if (previous) target = undefined;
+      const replaced = previousChat ? [previous, previousChat.panelId, this.inbox.data.homePanelId] : [previous];
       const projects = /^projects(?::(\d+))?$/.exec(view);
       const render = () => view === 'browse' ? this.a.chats.projects(target) :
-        projects ? this.a.showProjectPicker(target, Number(projects[1] || 0)) : this.show(view, target, true);
+        projects ? this.a.showProjectPicker(target, Number(projects[1] || 0)) :
+          this.show(view === 'general' ? 'home' : view, target, true, notice);
       let id;
       try { id = await render(); }
       catch (error) {
@@ -113,9 +119,11 @@ export class Controls {
       }
       if (id && !this.inbox.data.panels[String(id)]?.dismissedAt) {
         this.inbox.data.homePanelId = String(id);
-        if (previous && !previous.dismissedAt) {
-          previous.dismissedAt = this.inbox.now(); previous.expiresAt = 0;
-          previous.cleanup = { sentAt: previous.sentAt };
+        for (const oldId of new Set(replaced.filter(Boolean).map(String))) {
+          const old = this.inbox.data.panels[oldId];
+          if (!old || old.dismissedAt || oldId === String(id)) continue;
+          old.dismissedAt = this.inbox.now(); old.expiresAt = 0;
+          old.cleanup = { sentAt: old.sentAt, deleteRequested: true };
         }
         this.store.save();
       }
@@ -139,6 +147,19 @@ export class Controls {
     }
     return id;
   }
+  pendingReplyItem() {
+    const id = this.inbox.data.nextReplyMessageId;
+    return id && Object.values(this.inbox.data.items).find(item => item.notificationMessages?.[id]);
+  }
+  replyDestinationText(fallback) {
+    if (this.inbox.data.nextReplyMessageId === unconfirmedReply) return 'Open the reply again, or tap Home.';
+    const pending = this.pendingReplyItem();
+    if (pending && isVisible(pending)) {
+      return 'Next reply goes to ' + short(this.forDisplay(pending).displayLabel || pending.label, 200) + '.';
+    }
+    if (pending?.kind === 'input') return 'The selected question has closed. Tap Home or open another reply.';
+    return fallback;
+  }
   buttons(item) {
     if (!isVisible(item)) return { inline_keyboard: [] };
     const rows = [], questions = item.choiceQuestions || [];
@@ -158,7 +179,7 @@ export class Controls {
     if (item.kind === 'input') return { inline_keyboard: rows };
     rows.push([button(this.replyable(item) ? 'Open & reply' : 'Details', 'item:' + item.id)]);
     if (needsAttention(item) && isOpen(item) && item.source === 'desktop') rows.push([button('Remind me in 1 hour', 'snooze:' + item.id)]);
-    if (!['input', 'approval'].includes(item.kind)) rows.push([button('Mark reviewed', 'review:' + item.id)]);
+    if (!['input', 'approval'].includes(item.kind)) rows.push([button('Review & clear', 'review-clear:' + item.id)]);
     rows.push([homeButton]);
     return { inline_keyboard: rows };
   }
@@ -279,6 +300,9 @@ export class Controls {
     const source = item.imageSource || '';
     const display = this.forDisplay(item);
     let prepared, body = alertBody(display), renderedSource = source;
+    const replyTo = proactive ? item.route?.telegramReplyTo || this.store.data.jobs[item.jobId]?.telegramReplyTo : undefined;
+    const chatReply = replyTo && item.kind === 'completion' && source && !status;
+    if (chatReply && item.source === 'desktop') body = (display.displayLabel || item.label) + '\n\n' + source;
     const attempted = () => ['sending', 'delivered', 'unknown'].includes(item.mediaDelivery?.status);
     if (item.kind !== 'approval' && !attempted() && imageReferences(source).length) {
       const job = this.store.data.jobs[item.jobId];
@@ -298,7 +322,7 @@ export class Controls {
     if (sourceStart >= 0) body = body.slice(0, sourceStart) + displayMessage(renderedSource) + body.slice(sourceStart + source.length);
     const questionText = this.questionText(item);
     if (questionText) body = renderAttachedImages(questionText, prepared?.sources || item.mediaDelivery?.sources || []);
-    if (brief && body.length > 800) body = body.slice(0, 700) + '\n\nTap Open & reply for the full update.';
+    if (brief && !chatReply && body.length > 800) body = body.slice(0, 700) + '\n\nTap Open & reply for the full update.';
     if (!questionText && prepared?.skipped) body += `\n\n${prepared.skipped} ${prepared.skipped === 1 ? 'image could' : 'images could'} not be attached. See the original reply in Codex.`;
     if (!questionText && item.mediaDelivery?.status === 'unknown') body += '\n\nImage delivery is unconfirmed; it has not been retried.';
     const text = body + (questionText ? '' : status) + (replyPrompt ? '\n\nType your reply here, or tap Home to cancel.' : '');
@@ -315,13 +339,14 @@ export class Controls {
           (this.inbox.now() - item.observedAt >= 120_000 || item.snoozedUntil > this.inbox.now()))) {
         item.delivery = 'held'; item.heldAt ||= this.inbox.now(); this.store.save(); return [];
       }
-      if (item.source === 'desktop') keyboard = this.buttons(item);
+      if (chatReply) keyboard = { inline_keyboard: [[homeButton]] };
+      else if (item.source === 'desktop') keyboard = this.buttons(item);
     }
     const multipart = splitText(redact(text, [this.a.telegram.token])).length > 1;
     const recordText = (message, multipart = false) => record?.(message,
       { multipart, ...(keyboard?.force_reply ? { forceReply: true } : {}) });
     const messages = await this.a.send(text, item.jobId, keyboard,
-      message => recordText(message, multipart), { silent });
+      message => recordText(message, multipart), { silent, replyTo });
     if (!prepared?.images.length || attempted() || !messages.length || this.a.stopping) return messages;
     // Text/controls are already delivered. Claim the entire media operation
     // before upload; a concurrent Details view or restart cannot replay it.
@@ -342,54 +367,31 @@ export class Controls {
     } finally { this.store.save(); }
     return messages;
   }
-  async show(view = 'home', message, explicit = false) {
+  async show(view = 'home', message, explicit = false, notice = '') {
     this.syncJobs();
-    let text, rows, cleanupOffer;
+    let text, rows, cleanupOffer, clearAction;
     const settings = this.inbox.data.settings;
     const selected = this.a.projects.find(p => p.id === this.store.data.selectedProjectId);
     const attention = this.inbox.list(), snoozed = this.inbox.list('snoozed');
-    if (view === 'cleanup' || view === 'general') {
+    if (view === 'cleanup') {
       const currentId = String(message?.message_id || this.inbox.data.homePanelId || '');
-      cleanupOffer = { nonce: randomBytes(6).toString('hex'), expiresAt: this.inbox.now() + 5 * 60_000,
+      cleanupOffer = { nonce: randomBytes(6).toString('hex'), expiresAt: this.inbox.now() + 5 * 60_000, reviewDeletes: true,
         targets: {
           panels: Object.keys(this.inbox.data.panels).filter(id => id !== currentId && !this.inbox.data.panels[id].dismissedAt),
           chat: this.housekeeping.candidates(),
           updates: this.inbox.list('updates').filter(item => item.kind === 'completion').map(item => item.id)
         } };
     }
-    if (view === 'clear-chat') {
-      const targets = this.history.targets(message?.message_id);
-      const offer = { nonce: randomBytes(8).toString('hex'), ids: targets, expiresAt: this.inbox.now() + 5 * 60_000 };
-      text = targets.length
-        ? `Clear this Telegram chat?\n\nRemove up to ${targets.length} recent messages, including your messages and Codex replies. This can’t be undone. Codex chats and Inbox tasks stay.\n\nTelegram limits bots to messages they know about from the last 48 hours. Use Clear History in Telegram for anything left.`
-        : 'No recent messages to clear. Use Clear History in Telegram for older messages.';
-      rows = targets.length ? [[button('Clear messages', 'clear-confirm:' + offer.nonce)], [button('Cancel', 'home')]] : [[homeButton]];
-      const id = await this.panel(text, { inline_keyboard: rows }, message, view);
-      if (id && !this.inbox.data.panels[id]?.dismissedAt) {
-        this.inbox.data.panels[id].clearOffer = offer;
-        this.store.save();
-      }
-      return id;
-    } else if (view === 'general') {
-      const recent = this.inbox.now() - 48 * 60 * 60_000;
-      cleanupOffer.targets.panels = cleanupOffer.targets.panels.filter(id => this.inbox.data.panels[id]?.sentAt > recent);
-      cleanupOffer.targets.chat = cleanupOffer.targets.chat.filter(id => {
-        const entry = this.housekeeping.records[id];
-        return entry?.kind === 'help' && entry.sentAt > recent;
-      });
-      const count = cleanupOffer.targets.panels.length + cleanupOffer.targets.chat.length;
-      text = 'General\n\nType a message to send it to General.';
-      rows = count ? [[button(`Clear bot panels & notices · ${count}`, 'clean:bot:' + cleanupOffer.nonce)]] : [];
-      rows.push([button('⌂', 'home')]);
-    } else if (view === 'home') {
+    if (view === 'home') {
+      const panel = this.inbox.data.panels[String(message?.message_id)];
+      clearAction = panel?.clearAction || 'clear-chat:' + randomBytes(8).toString('hex');
       const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' :
         this.store.data.generalDestination ? 'General' : 'Auto');
-      text = `Home\nSend to: ${destination}\n\n` + (selected ? 'Type to message this project.' :
-        this.store.data.selectedProjectId ? 'Choose another project.' :
-        this.store.data.generalDestination ? 'Type to message General.' : 'Type a message or choose a project.');
-      rows = [[button('Projects', 'browse'), button('General', 'general')],
-        [button(`Inbox · ${attention.length}`, 'attention:0'), button('Updates', 'updates:0')],
-        [button('Running', 'running'), button('More', 'more')], [button('Clear chat', 'clear-chat')]];
+      text = `Home\nSend to: ${destination}\n\n` + (this.store.data.selectedProjectId && !selected ? 'Choose a different destination.' :
+        'Type a message below.') + (notice ? '\n\n' + notice : '');
+      rows = [[button('Chats', 'browse'), button('General', 'general')],
+        [button(attention.length ? `Inbox (${attention.length})` : 'Inbox', 'attention:0'), button('Updates', 'updates:0')],
+        [button('Running', 'running'), button('More', 'more')], [button('Clear chat', clearAction)]];
     } else if (view === 'more') {
       text = 'More\n\nAlerts: ' + this.activity.status().label;
       rows = [[button('Routing', 'projects'), button('Alert settings', 'settings')],
@@ -427,11 +429,11 @@ export class Controls {
     } else if (view === 'cleanup') {
       const counts = Object.fromEntries(Object.entries(cleanupOffer.targets).map(([key, ids]) => [key, ids.length]));
       const manual = Object.values(this.housekeeping.records).filter(item => item.cleanup?.status === 'manual').length;
-      text = `Cleanup\n\nRemove old bot panels or notices here. Your messages and delivered Codex results stay in the chat.\n\nOther panels: ${counts.panels}\nBot notices: ${counts.chat}\nCompleted updates to review: ${counts.updates}${manual ? `\n\n${manual} older sent ${manual === 1 ? 'message needs' : 'messages need'} Telegram’s Delete action.` : ''}`;
+      text = `Cleanup\n\nClose old bot panels or clear notices. Reviewing updates here also removes their recent Telegram messages and attachments.\n\nOther panels: ${counts.panels}\nBot notices: ${counts.chat}\nCompleted updates to review: ${counts.updates}${manual ? `\n\n${manual} older sent ${manual === 1 ? 'message needs' : 'messages need'} Telegram’s Delete action.` : ''}`;
       rows = [[button(`Clear bot panels and notices · ${counts.panels + counts.chat}`, 'clean:all:' + cleanupOffer.nonce)],
         [button(`Close other panels · ${counts.panels}`, 'clean:panels:' + cleanupOffer.nonce)],
         [button(`Clear bot notices · ${counts.chat}`, 'clean:chat:' + cleanupOffer.nonce)],
-        [button(`Mark updates reviewed · ${counts.updates}`, 'clean:updates:' + cleanupOffer.nonce)],
+        [button(`Review & clear updates · ${counts.updates}`, 'clean:updates:' + cleanupOffer.nonce)],
         [button('↻ Refresh', 'cleanup'), moreButton, homeButton]];
     } else if (view === 'running') {
       let desktop;
@@ -448,9 +450,17 @@ export class Controls {
       text = `Connection\n\n${this.freshness()}\nContext: ${snapshot?.status || 'unavailable'}${snapshot?.observedAt ? ' · checked ' + this.age(Date.parse(snapshot.observedAt)) : ''}\nProjects: ${this.a.projects.length}\nListener: ${this.a.stopping ? 'stopping' : 'running'}\nActive controls: inbox-v1\n\nText and photos/images are enabled. Voice is not enabled. Some approval forms still require Codex on your computer.\n\nThe computer must be awake and online. This panel shows the last observed state; it cannot announce its own loss of power.`;
       rows = [[button('↻ Refresh', 'health'), moreButton, homeButton]];
     } else return;
+    if (view !== 'home') {
+      const active = this.store.data.activeChat;
+      const destination = this.replyDestinationText(active?.label ? 'Messages go to ' + short(active.label, 200) + '.' : '');
+      if (destination) text += '\n\n' + destination;
+    }
     const id = await this.panel(text, { inline_keyboard: rows }, message, view);
     if (cleanupOffer && id && !this.inbox.data.panels[String(id)]?.dismissedAt) {
       this.inbox.data.panels[String(id)].cleanupOffer = cleanupOffer; this.store.save();
+    }
+    if (clearAction && id && !this.inbox.data.panels[String(id)]?.dismissedAt) {
+      this.inbox.data.panels[String(id)].clearAction = clearAction; this.store.save();
     }
     return id;
   }
@@ -460,6 +470,10 @@ export class Controls {
     if (!panel || panel.dismissedAt || !scopes[panel.view]?.includes(scope) || !offer || offer.usedAt ||
         offer.nonce !== nonce || offer.expiresAt <= this.inbox.now())
       return this.confirm(q, 'This cleanup selection expired. Open Cleanup again.');
+    if (scope === 'updates' && !offer.reviewDeletes) {
+      this.acknowledge(q);
+      return this.queuePanel(() => this.show('cleanup', q.message));
+    }
     offer.usedAt = this.inbox.now(); this.store.save();
     let count = 0;
     if (['panels', 'all', 'bot'].includes(scope)) {
@@ -473,11 +487,11 @@ export class Controls {
     if (['chat', 'all', 'bot'].includes(scope)) count += this.housekeeping.queue(offer.targets.chat, { deleteRequested: true });
     if (scope === 'updates') for (const id of offer.targets.updates) {
       const item = this.inbox.get(id);
-      if (item?.kind === 'completion' && isVisible(item) && this.inbox.review(id)) count++;
+      if (item?.kind === 'completion' && isVisible(item) && this.inbox.review(id, { removeNotification: true })) count++;
     }
     await this.confirm(q, count ? scope === 'updates' ? `${count} updates marked reviewed.` : `Cleanup started for ${count} messages.` : 'Nothing to clear here.');
     await this.flush();
-    return this.open(['all', 'bot'].includes(scope) ? panel.view : 'cleanup', q.message);
+    return this.open(scope === 'bot' ? 'home' : scope === 'all' ? panel.view : 'cleanup', q.message);
   }
   freshness() {
     const health = this.a.desktop?.health;
@@ -489,7 +503,7 @@ export class Controls {
   age(at) { const minutes = Math.max(0, Math.floor((this.inbox.now() - at) / 60_000)); return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`; }
   async panel(text, keyboard, message, view, options = { silent: true }) {
     const rows = [...(keyboard?.inline_keyboard || [])], last = rows.at(-1);
-    if (!['browse', 'chat-list', 'chat-preview', 'chat-active', 'general', 'projects', 'clear-chat', 'clear-result'].includes(view)) {
+    if (!['home', 'browse', 'chat-list', 'chat-active', 'projects'].includes(view)) {
       const close = button('Close', 'close');
       if (last?.length < 3 && last.some(b => ['ctl:home', 'ctl:more'].includes(b.callback_data))) rows[rows.length - 1] = [...last, close];
       else rows.push([close]);
@@ -508,7 +522,8 @@ export class Controls {
         }); } catch (error) { if (error.telegramReason !== 'message-unchanged') throw error; }
       }
       if (panel.dismissedAt) return message.message_id;
-      if (view !== 'clear-chat') delete panel.clearOffer;
+      delete panel.clearOffer;
+      if (view !== 'home') delete panel.clearAction;
       Object.assign(panel, { signature, view, projectId: this.store.data.selectedProjectId || 'general',
         expiresAt: this.inbox.now() + 24 * 60 * 60_000 }); this.store.save();
       return message.message_id;
@@ -571,18 +586,38 @@ export class Controls {
     const action = String(q.data).slice(4), [verb, value] = action.split(':');
     if (verb === 'answer') return this.answer(q, action);
     if (verb === 'clean') return this.runCleanup(q, value, action.split(':')[2]);
-    if (verb === 'clear-confirm') return this.confirmClearChat(q, value);
+    if (verb === 'clear-chat') {
+      const id = String(q.message?.message_id), panel = this.inbox.data.panels[id];
+      this.acknowledge(q);
+      if (!panel || panel.view !== 'home' || panel.dismissedAt || this.inbox.data.homePanelId !== id || this.clearingChat) return;
+      if (!panel.clearAction) {
+        return this.queuePanel(() => this.show('home', q.message));
+      }
+      // A queued tap from the previous keyboard must not clear a fresh reply.
+      if (action === panel.clearAction) {
+        panel.clearAction = '';
+        this.store.save();
+        await this.clearChat(q.message);
+      }
+      return;
+    }
+    if (verb === 'clear-confirm') {
+      const id = String(q.message?.message_id), panel = this.inbox.data.panels[id];
+      this.acknowledge(q);
+      if (panel?.view === 'clear-chat' && !panel.dismissedAt && this.inbox.data.homePanelId === id) {
+        return this.queuePanel(() => this.show('home', q.message));
+      }
+      return;
+    }
     if (action === 'home') {
-      const selected = this.clearReplyDestination();
       this.acknowledge(q);
       const panel = this.inbox.data.panels[String(q.message?.message_id)];
       if (panel?.dismissedAt) return this.open('home');
-      return !panel && selected
-        ? this.open('home', undefined, q.message?.message_id) : this.open('home', q.message);
+      return panel ? this.open('home', q.message) : this.open('home', undefined, q.message?.message_id);
     }
     const id = String(q.message?.message_id);
     const panel = this.inbox.data.panels[id];
-    if (!panel && ['item', 'review', 'snooze'].includes(verb)) {
+    if (!panel && ['item', 'review', 'review-clear', 'snooze'].includes(verb)) {
       const item = this.inbox.get(value);
       const ownCard = this.isBotMessage(q.message) && /^[1-9]\d*$/.test(id) &&
         q.message.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === q.data);
@@ -611,8 +646,8 @@ export class Controls {
     if (panel?.dismissedAt) return;
     if (verb === 'item') return this.item(value);
     if (verb === 'snooze') { this.inbox.snooze(value); return this.open('snoozed:0', q.message); }
-    if (verb === 'review') {
-      if (this.inbox.review(value)) await this.refreshChoiceMarkup(this.inbox.get(value));
+    if (verb === 'review' || verb === 'review-clear') {
+      if (this.inbox.review(value, { removeNotification: verb === 'review-clear' })) await this.refreshChoiceMarkup(this.inbox.get(value));
       return this.refreshClosedInboxPanels();
     }
     if (verb === 'projects' && /^projects(?::\d+)?$/.test(action)) return this.open(action, q.message);
@@ -636,22 +671,17 @@ export class Controls {
     }
     return this.open(action, q.message);
   }
-  async confirmClearChat(q, nonce) {
-    const id = String(q.message?.message_id);
-    const panel = this.inbox.data.panels[id], offer = panel?.clearOffer;
-    if (!panel || panel.dismissedAt || panel.view !== 'clear-chat' || this.inbox.data.homePanelId !== id ||
-        !offer || offer.nonce !== nonce || offer.expiresAt <= this.inbox.now()) {
-      return this.confirm(q, 'That confirmation expired. Open Clear chat again.');
-    }
-    this.acknowledge(q);
-    delete panel.clearOffer;
-    this.clearReplyDestination();
-    this.store.save();
-    const { accepted, remaining } = await this.history.clear(offer.ids.filter(target => target !== id), this.a.telegram);
-    const result = remaining ? `Telegram accepted cleanup for ${accepted} of ${accepted + remaining} messages. Open Clear chat to try again.` :
-      'Recent messages cleared.';
-    return this.panel(result + '\n\nFor older messages, use Clear History in Telegram.',
-      { inline_keyboard: [[button('⌂ Home', 'home')]] }, q.message, 'clear-result');
+  async clearChat(menu, commandId) {
+    if (this.clearingChat) return this.clearingChat;
+    const targets = this.history.targets(menu?.message_id);
+    this.clearingChat = (async () => {
+      const { accepted, remaining } = await this.history.clear(targets, this.a.telegram);
+      const result = remaining ? 'Some recent messages remain. Tap Clear chat to retry.' :
+        accepted ? 'Recent messages cleared.' : 'No recent messages to clear.';
+      return this.open('home', menu, commandId, result + ' Use Telegram’s Clear History for anything left.');
+    })();
+    try { return await this.clearingChat; }
+    finally { this.clearingChat = null; }
   }
   choiceMessages(item) {
     return notificationIds(this, item)
@@ -761,7 +791,7 @@ export class Controls {
   syncJobs() {
     for (const job of Object.values(this.store.data.jobs)) if (['failed', 'uncertain', 'interrupted'].includes(job.status)) {
       this.inbox.observe('job-check:' + job.id, { source: 'bridge', kind: 'failure', jobId: job.id,
-        label: job.project || 'General', text: `${job.project || 'General'} — needs checking\n\n${job.recoveryNote || job.output || 'The task ' + job.status + '. Inspect its current state before continuing.'}\n\nMarking this reviewed only clears the inbox; it does not stop, replay or release the task.` });
+        label: job.project || 'General', text: `${job.project || 'General'} — needs checking\n\n${job.recoveryNote || job.output || 'The task ' + job.status + '. Inspect its current state before continuing.'}` });
     }
   }
   async refreshClosedInboxPanels(limit = 2) {
