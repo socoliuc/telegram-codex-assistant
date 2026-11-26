@@ -5,6 +5,7 @@ import { questionChoices, choiceRevision, questionAnswered, reconcileSavedChoice
 
 const terminal = new Set(['completed','failed','interrupted']);
 const replyWatchMs = 24 * 60 * 60_000;
+const telegramRequestPrefix = 'Owner replied in Telegram [request ';
 
 function containsRequest(turn, marker) {
   if (!marker) return false;
@@ -22,26 +23,28 @@ function containsRequest(turn, marker) {
 // message keyed by its tool call, omitting delivery/questions and waiting flags.
 const isQuestion = item => item.type === 'agentMessage' && (item.questions?.length ||
   (item.text && (item.delivery === 'async' || (item.phase === 'final_answer' && item.id?.startsWith('call_')))));
+function* structuredAnswers(item) {
+  if (item.type !== 'userMessage') return;
+  for (const content of item.content || []) {
+    const match = content.type === 'text' && content.text?.trim().match(/^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/);
+    if (!match) continue;
+    try {
+      const replies = JSON.parse(match[1]);
+      if (!Array.isArray(replies)) continue;
+      for (const reply of replies) {
+        const id = JSON.parse(reply.questionItemId);
+        if (Array.isArray(id) && id[0] === 'request_user_input_async' && typeof id[1] === 'string' && Number.isInteger(id[2]))
+          yield { callId: id[1], index: id[2], question: reply.question };
+      }
+    } catch { /* Unrecognized user text is not evidence a question was answered. */ }
+  }
+}
 function answeredQuestions(turns) {
   const answered = new Map();
-  for (const turn of turns) for (const item of turn.items || []) {
-    if (item.type !== 'userMessage') continue;
-    for (const content of item.content || []) {
-      const match = content.type === 'text' && content.text?.trim().match(/^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/);
-      if (!match) continue;
-      try {
-        const replies = JSON.parse(match[1]);
-        if (!Array.isArray(replies)) continue;
-        for (const reply of replies) {
-          const id = JSON.parse(reply.questionItemId);
-          if (Array.isArray(id) && id[0] === 'request_user_input_async' && typeof id[1] === 'string' && Number.isInteger(id[2])) {
-            const answers = answered.get(id[1]) || [];
-            answers.push({ index: id[2], question: reply.question });
-            answered.set(id[1], answers);
-          }
-        }
-      } catch { /* Unrecognized user text is not evidence a question was answered. */ }
-    }
+  for (const turn of turns) for (const item of turn.items || []) for (const answer of structuredAnswers(item)) {
+    const answers = answered.get(answer.callId) || [];
+    answers.push(answer);
+    answered.set(answer.callId, answers);
   }
   return answered;
 }
@@ -63,16 +66,63 @@ function isAnswered(item, answered) {
     return choices.length > 0 && choices.every(line => /^[-•] \S.*$/u.test(line));
   });
 }
+function finalMessages(turn) {
+  const items = turn.items || [];
+  let cutoff = -1;
+  const questionIndex = items.findLastIndex(isQuestion);
+  const question = items[questionIndex];
+  if (question) {
+    // Work can continue while the question is open. Once its exact answer
+    // arrives, earlier text is no longer a new result from the exchange.
+    const answers = [], answered = new Map([[question.id, answers]]);
+    for (let index = questionIndex + 1; index < items.length; index++) {
+      for (const answer of structuredAnswers(items[index])) {
+        if (answer.callId === question.id) answers.push(answer);
+      }
+      if (answers.length && isAnswered(question, answered)) {
+        cutoff = index;
+        break;
+      }
+    }
+  }
+  return items.slice(cutoff + 1)
+    .filter(item => item.type === 'agentMessage' && [undefined, null, 'final_answer'].includes(item.phase) && !isQuestion(item) && item.text)
+    .map(item => item.text);
+}
+function hasFollowUp(turn) {
+  return (turn?.items || []).some(item => {
+    if (item.type !== 'userMessage') return false;
+    const content = item.content || [];
+    const texts = content.filter(part => part.type === 'text').map(part => part.text?.trim()).filter(Boolean);
+    if (texts.some(text => text.startsWith(telegramRequestPrefix) ||
+        /^(?:Automation(?: ID)?:|<(?:send_user_message_question_reply|automation_context|heartbeat|codex_delegation|subagent_context)(?:\s|>))/u.test(text))) return false;
+    return texts.length > 0 || content.some(part => ['image', 'localImage'].includes(part.type));
+  });
+}
 function continuationAfter(turn, turns) {
-  const next = turns[turns.findIndex(t => t.id === turn.id) - 1];
-  const completed = Number(turn.completedAt), started = Number(next?.startedAt);
-  if (!next || !completed || !started || started < completed) return null;
-  // A newer status alone is not acknowledgement. Require a new user message
-  // after this result, not a structured answer tied to another question.
-  const replied = (next.items || []).some(item => item.type === 'userMessage' &&
-    (item.content || []).some(c => c.type === 'text' && c.text?.trim() &&
-      !c.text.trim().startsWith('<send_user_message_question_reply>')));
-  return replied ? next.id : null;
+  const index = turns.findIndex(candidate => candidate.id === turn.id);
+  const completed = Number(turn.completedAt);
+  if (index <= 0 || !(completed > 0)) return null;
+  const question = (turn.items || []).findLast(isQuestion);
+  const answers = question && answeredQuestions([turn]);
+  const pendingQuestion = question && !isAnswered(question, answers);
+  let sameExchange = true;
+  for (let offset = index - 1; offset >= 0; offset--) {
+    const next = turns[offset];
+    // The ordered history identifies a separate Telegram request even when
+    // it has no timestamp. Exact answers can still identify the original.
+    if (containsRequest(next, telegramRequestPrefix)) sameExchange = false;
+    if (!(Number(next.startedAt) >= completed)) continue;
+    if (pendingQuestion) {
+      const replies = answeredQuestions([next]).get(question.id);
+      if (replies?.length) {
+        answers.set(question.id, [...(answers.get(question.id) || []), ...replies]);
+        if (isAnswered(question, answers)) return next.id;
+      }
+    }
+    if (sameExchange && hasFollowUp(next)) return next.id;
+  }
+  return null;
 }
 export class DesktopMonitor {
   constructor({ tools, store, send, loadProjects, loadEvents = () => [], excludeThreadIds = () => [], excludeRoots = [], controls,
@@ -116,18 +166,18 @@ export class DesktopMonitor {
         for (const submission of group) {
           const turn = (turns || []).find(turn => containsRequest(turn, submission.requestMarker));
           if (!turn || !terminal.has(turn.status)) continue;
-          const final = (turn.items || []).findLast(item => item.type === 'agentMessage' &&
-            [undefined, null, 'final_answer'].includes(item.phase) && !isQuestion(item) && item.text)?.text;
-          if (!final && turn.status === 'completed') continue;
+          const final = finalMessages(turn).at(-1);
+          const continuedBy = turn.status === 'completed' && continuationAfter(turn, turns);
+          if (!final && turn.status === 'completed' && !continuedBy) continue;
           const label = `${project?.name || 'General'} · ${thread.title || '(untitled)'}`;
           submission.resultTurnId = turn.id;
           const route = { threadId: id, hostId: 'local', turnId: turn.id, direct: true, label, telegramReplyTo: submission.telegramReplyTo,
             projectId: project?.id || null, kind: turn.status === 'completed' ? 'completion' : 'failure',
             origin: { cwd: thread.cwd, projectId: thread.projectId || null },
             imageRoots: [thread.cwd, ...(project?.roots || [])].filter(Boolean), context: final?.slice(0, 1800) || '' };
-          const text = final || `Codex reported this reply as ${turn.status}.`;
+          const text = final || (continuedBy ? 'Continued in Codex.' : `Codex reported this reply as ${turn.status}.`);
           await this.notice(`local:${id}:${turn.id}:terminal`, `${label}\n\n${text}`, route, undefined, true,
-            { sourceAt: Number(turn.completedAt) * 1000 || now, imageSource: final });
+            { sourceAt: Number(turn.completedAt) * 1000 || now, imageSource: final, continuedBy });
           submission.replyObservedAt = now;
         }
       } catch { /* Retry reads for the watched chat without resending the prompt. */ }
@@ -191,7 +241,15 @@ export class DesktopMonitor {
       });
       // Reconcile one known notice first; reserve the remaining budget for
       // oldest observations so busy known chats cannot starve new work.
-      const pending = new Set(Object.values(this.inbox.data.items).filter(item => item.source === 'desktop' && isOpen(item)).map(item => item.route?.threadId));
+      const openItems = Object.values(this.inbox.data.items).filter(item => item.source === 'desktop' && isOpen(item));
+      const pending = new Set(openItems.map(item => item.route?.threadId));
+      const directResults = new Map();
+      for (const item of openItems) {
+        if (item.kind !== 'completion' || !item.route?.direct) continue;
+        const ids = directResults.get(item.route.threadId) || [];
+        ids.push(item.route.turnId);
+        directResults.set(item.route.threadId, ids);
+      }
       const priorityId = changed.filter(row => pending.has(row.id)).sort((a, b) =>
         (watch.threads[a.id]?.checkedAt || 0) - (watch.threads[b.id]?.checkedAt || 0))[0]?.id;
       changed.sort((a, b) => Number(b.id === priorityId) - Number(a.id === priorityId) ||
@@ -241,8 +299,12 @@ export class DesktopMonitor {
         }
         if (historyReads >= this.maxReadsPerScan) { deferred++; continue; }
         let data;
+        // An intervening Telegram request can change what a follow-up refers
+        // to. Fetch bounded history only when a direct result needs that proof.
+        const latestId = poll.latestTurn?.id;
+        const verifyDirect = latestId && directResults.get(row.id)?.some(id => id !== latestId);
         historyReads++;
-        try { data = await this.tools.read(row.id,row.hostId || 'local', { turnLimit: 1 }); }
+        try { data = await this.tools.read(row.id,row.hostId || 'local', { turnLimit: verifyDirect ? 3 : 1 }); }
         catch {
           readFailures++;
           recordFailure(row, poll.latestTurn?.id);
@@ -282,20 +344,27 @@ export class DesktopMonitor {
           if (complete) this.inbox.resolve(item, 'Answered in Codex.');
         }
         const latest = data.turns[0];
-        const newUserMessage = latest?.items?.some(item => item.type === 'userMessage' && (item.content || []).some(content =>
-          content.type === 'text' && content.text?.trim() && !content.text.trim().startsWith('<send_user_message_question_reply>')));
-        // Only the latest turn is fetched. A subsequent, real user prompt can
-        // still acknowledge a saved result or supersede an older request.
-        if (newUserMessage && Number(latest.startedAt) > 0) {
+        const latestFollowUpAt = hasFollowUp(latest) && Number(latest.startedAt) * 1000;
+        if (latest && (latestFollowUpAt > 0 || verifyDirect)) {
           for (const item of Object.values(this.inbox.data.items)) {
             if (item.source !== 'desktop' || item.route?.threadId !== thread.id || item.route.turnId === latest.id || !isOpen(item)) continue;
             const sourceAt = item.sourceAt || item.createdAt;
-            if (!sourceAt || Number(latest.startedAt) * 1000 < sourceAt) continue;
-            item.continuedByTurnId = latest.id;
+            let continuedBy;
+            if (item.route.direct && item.kind === 'completion') {
+              const source = data.turns.find(turn => turn.id === item.route.turnId);
+              if (source) continuedBy = continuationAfter(source, data.turns);
+            } else if (sourceAt > 0 && latestFollowUpAt >= sourceAt) {
+              continuedBy = latest.id;
+            }
+            if (!continuedBy) continue;
+            item.continuedByTurnId = continuedBy;
             this.inbox.resolve(item, 'Continued in Codex.');
           }
         }
-        for (const turn of [...data.turns].reverse()) {
+        // Extra history is for reconciliation only. Discovery still handles
+        // the latest turn, without broadcasting older results or requests.
+        const notificationTurns = verifyDirect ? data.turns.slice(0, 1) : data.turns;
+        for (const turn of [...notificationTurns].reverse()) {
           const observed = previous?.turnIds?.includes(turn.id);
           const sourceAt = Number(turn.completedAt) > 0 ? Number(turn.completedAt) * 1000 : undefined;
           const newTurn = Number(turn.startedAt)*1000 >= Date.parse(watch.enabledAt) || observed || events.some(e=>e.sessionId===row.id && e.turnId===turn.id);
@@ -327,16 +396,12 @@ export class DesktopMonitor {
               { sourceAt, imageSource: question, choiceQuestions: choices, answeredQuestionIndexes: choices.filter(q => questionAnswered(q, answered.get(item.id))).map(q => q.index) });
           }
           if ((newTurn || this.wasObserved(`${hostId}:${thread.id}:${turn.id}:terminal`)) && terminal.has(turn.status) && !hasQuestion) {
-            const final = (turn.items || []).filter(i => i.type === 'agentMessage' && [undefined,null,'final_answer'].includes(i.phase) && !isQuestion(i)).map(i=>i.text).filter(Boolean).join('\n\n');
+            const final = finalMessages(turn).join('\n\n');
             if (!final && turn.status === 'completed') continue;
             const question = turn.id === data.turns[0]?.id && turn.status === 'completed' && /\?["'”’*_)]*\s*$/u.test(final);
             const title = question ? 'has a question for you' : turn.status === 'completed' ? 'has an update' : turn.status;
             const continuedBy = turn.status === 'completed' && !question && continuationAfter(turn, data.turns);
-            const notification = await this.notice(`${hostId}:${thread.id}:${turn.id}:terminal`, `${label} — ${title}\n\n${final || 'Codex did not return a final summary.'}\n\nReply here to continue.`, { ...base, kind: question?'input':turn.status==='completed'?'completion':'failure', context: final.slice(0,1800) }, seen, !continuedBy, { sourceAt, imageSource: final });
-            if (continuedBy && notification?.kind === 'completion' && isOpen(notification)) {
-              notification.continuedByTurnId = continuedBy;
-              this.inbox.resolve(notification, 'Continued in Codex.');
-            }
+            await this.notice(`${hostId}:${thread.id}:${turn.id}:terminal`, `${label} — ${title}\n\n${final || 'Codex did not return a final summary.'}\n\nReply here to continue.`, { ...base, kind: question?'input':turn.status==='completed'?'completion':'failure', context: final.slice(0,1800) }, seen, true, { sourceAt, imageSource: final, continuedBy });
           }
         }
         let waiting = null;
@@ -353,9 +418,9 @@ export class DesktopMonitor {
             { threadId:thread.id, hostId, turnId:current.id, projectId:project?.id || null, label, direct: Boolean(request),
               telegramReplyTo: request?.telegramReplyTo, kind:approval?'approval':'input', nativeWaiting: true, context:'Native Codex input/approval request' }, seen);
         }
-        this.inbox.reconcileDesktop(thread.id, seen, data.turns);
+        this.inbox.reconcileDesktop(thread.id, seen, notificationTurns);
         watch.threads[row.id] = { updatedAt: row.updatedAt, status: row.status, checkedAt: this.now(), pollCursor: poll.cursor, latestTurnId: latest?.id,
-          waiting, waitingGeneration, turnIds: data.turns.filter(t => !terminal.has(t.status)).map(t=>t.id) };
+          waiting, waitingGeneration, turnIds: notificationTurns.filter(t => !terminal.has(t.status)).map(t=>t.id) };
         consumed.add(row.id);
         this.store.save();
       }
@@ -384,11 +449,15 @@ export class DesktopMonitor {
     }
     return request;
   }
-  async notice(key, text, route, seen, deliver = true, choices = {}) {
+  async notice(key, text, route, seen, deliver = true, { continuedBy, ...details } = {}) {
     const id = 'desktop:' + key;
     if (this.closed) return;
     const item = this.inbox.observe(id, { source: 'desktop', kind: route.kind, label: route.label, text, route,
-      imageRoots: route.imageRoots || [], ...choices });
+      imageRoots: route.imageRoots || [], ...details });
+    if (continuedBy && isOpen(item)) {
+      item.continuedByTurnId = continuedBy;
+      this.inbox.resolve(item, 'Continued in Codex.');
+    }
     if (needsAttention(item) && needsAttention(route)) seen?.add(item.id);
     // A native waiting form can take notification priority without resolving
     // an earlier, still-unanswered async question in the same turn.

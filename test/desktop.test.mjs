@@ -142,6 +142,120 @@ test('a completed turn containing an explicit unanswered async question notifies
   }finally{f.cleanup();}
 });
 
+test('an answered async question cannot send earlier final text as a new notification', async () => {
+  const f = fixture();
+  try {
+    f.put('a', 'a', 'turn', 'completed', 'Earlier context that should not be resent.');
+    const turn = f.histories.get('a').turns[0];
+    turn.items.push({ type: 'agentMessage', id: 'call_confirm', phase: 'final_answer', text: 'Which color?' });
+    await f.monitor.scan();
+    assert.equal(f.sent.length, 1);
+    const question = f.monitor.inbox.list()[0];
+    assert.equal(question.kind, 'input');
+
+    turn.items.push({ type: 'agentMessage', id: 'msg_while_waiting', phase: 'final_answer', text: 'Older progress while waiting.' },
+      { type: 'userMessage', content: [{ type: 'text', text:
+      '<send_user_message_question_reply>' +
+      JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'call_confirm', 0]),
+        question: 'Which color?', answer: 'Blue' }]) + '</send_user_message_question_reply>' }] });
+    f.histories.get('a').thread.updatedAt++;
+    await f.monitor.scan();
+    assert.equal(question.status, 'resolved');
+    assert.equal(f.sent.length, 1);
+
+    turn.items.push({ type: 'agentMessage', id: 'msg_fresh', phase: 'final_answer', text: 'Blue is applied.' });
+    f.histories.get('a').thread.updatedAt++;
+    await f.monitor.scan();
+    assert.equal(f.sent.length, 2);
+    assert.match(f.sent[1].text, /Blue is applied/);
+    assert.doesNotMatch(f.sent[1].text, /Earlier context|Older progress/);
+  } finally { f.cleanup(); }
+});
+
+test('delayed results stay quiet after a Codex reply and still deliver across automation or another Telegram request', async () => {
+  for (const followUp of ['codex', 'automation', 'telegram', 'later-request', 'missing-timestamp', 'structured', 'other-question', 'unanswered']) {
+    const f = fixture();
+    try {
+      f.put('source', 'a', 'requested');
+      await f.monitor.reply({ threadId: 'source', hostId: 'local', projectId: 'a', kind: 'chat' }, 'Check this', 702);
+      const submission = f.store.data.desktopSubmissions['702'];
+      const history = f.histories.get('source');
+      const result = history.turns[0];
+      result.items.unshift({ type: 'userMessage', content: [{ type: 'text', text: submission.requestMarker }] });
+      history.turns.unshift({ id: 'automation', status: 'completed', startedAt: result.completedAt + 2,
+        items: [{ type: 'userMessage', content: [{ type: 'text', text: '<automation_context>Routine update</automation_context>' }] }] });
+      if (['codex', 'telegram', 'later-request', 'missing-timestamp'].includes(followUp)) {
+        const content = followUp === 'codex' ? [{ type: 'image' }] :
+          [{ type: 'text', text: 'Owner replied in Telegram [request 703] in this conversation:\n\nA new request.' }];
+        history.turns.splice(1, 0, { id: 'follow-up', status: 'completed',
+          ...(followUp === 'missing-timestamp' ? {} : { startedAt: result.completedAt + 1 }),
+          items: [{ type: 'userMessage', content }] });
+      }
+      if (['later-request', 'missing-timestamp'].includes(followUp)) {
+        history.turns[0].items = [{ type: 'userMessage', content: [{ type: 'text', text: 'Thanks for the second result.' }] }];
+      }
+      if (['structured', 'other-question'].includes(followUp)) {
+        result.items.splice(1, 0, { type: 'agentMessage', id: 'call_confirm', phase: 'final_answer', text: 'Which color?' });
+        const call = followUp === 'structured' ? 'call_confirm' : 'call_other';
+        history.turns[0].items = [{ type: 'userMessage', content: [{ type: 'text', text:
+          '<send_user_message_question_reply>' + JSON.stringify([
+            { questionItemId: JSON.stringify(['request_user_input_async', call, 0]), question: 'Which color?', answer: 'Blue' }
+          ]) + '</send_user_message_question_reply>' }] }];
+      }
+      if (followUp === 'unanswered') {
+        result.items.push({ type: 'agentMessage', id: 'call_next', phase: 'final_answer', text: 'Should I continue?' });
+      }
+      if (followUp !== 'later-request') {
+        f.tools.list = async () => { throw new Error('Test the direct reply watcher independently'); };
+      } else {
+        const read = f.tools.read;
+        f.tools.read = async (id, host, options) => {
+          const data = await read(id, host);
+          return { ...data, turns: data.turns.slice(0, options.turnLimit) };
+        };
+      }
+      await f.monitor.scan();
+      await f.monitor.scan();
+      assert.equal(submission.resultTurnId, result.id);
+      const responded = ['codex', 'structured'].includes(followUp);
+      assert.equal(f.sent.length, responded ? 0 : 1, followUp);
+      if (!responded) assert.match(f.sent[0].text, /Finished$/, followUp);
+      assert.ok(submission.replyObservedAt, followUp);
+      const item = Object.values(f.monitor.inbox.data.items).find(item => item.route.turnId === result.id);
+      assert.equal(item.status, responded ? 'resolved' : 'open');
+    } finally { f.cleanup(); }
+  }
+});
+
+test('the regular monitor closes a delivered direct result after a proven same-chat follow-up', async () => {
+  const f = fixture();
+  try {
+    f.put('source', 'a', 'requested');
+    await f.monitor.reply({ threadId: 'source', hostId: 'local', projectId: 'a', kind: 'chat' }, 'Check this', 704);
+    const submission = f.store.data.desktopSubmissions['704'];
+    const history = f.histories.get('source');
+    const result = history.turns[0];
+    result.items.unshift({ type: 'userMessage', content: [{ type: 'text', text: submission.requestMarker }] });
+    const read = f.tools.read;
+    f.tools.read = async (id, host, options) => {
+      const data = await read(id, host);
+      return { ...data, turns: data.turns.slice(0, options.turnLimit) };
+    };
+    await f.monitor.scan();
+    const [item] = f.monitor.inbox.list('updates');
+    assert.ok(item.route.direct);
+    assert.equal(f.sent.length, 1);
+
+    history.thread.updatedAt++;
+    history.turns.unshift({ id: 'codex-follow-up', status: 'inProgress', startedAt: result.completedAt + 1,
+      items: [{ type: 'userMessage', content: [{ type: 'text', text: 'Thanks, continue.' }] }] });
+    await f.monitor.scan();
+    assert.equal(item.status, 'resolved');
+    assert.equal(item.continuedByTurnId, 'codex-follow-up');
+    assert.equal(f.sent.length, 1);
+  } finally { f.cleanup(); }
+});
+
 test('old completed questions are baselined and successive native approvals in one turn each notify',async()=>{
   const f=fixture();try{
     f.put('old','a','old','completed','');f.histories.get('old').turns[0].startedAt=1;
