@@ -803,7 +803,7 @@ export class Assistant {
       return;
     }
     if (!image && /^\/clear_chat(?:@\w+)?$/.test(text)) {
-      await this.controls.clearChat(undefined, m.message_id);
+      await this.controls.clearChat();
       return;
     }
     const command = !image && text.match(/^\/(menu|help|start|inbox|settings|connection|updates|project|projects|chats|general|status|cleanup)(?:@\w+)?$/)?.[1];

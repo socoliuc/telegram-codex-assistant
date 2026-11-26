@@ -1368,21 +1368,22 @@ test('Clear chat takes one tap on Home and removes recent messages from both sid
     assert.equal(deletes().length, 1);
     const { chat_id: chat, message_ids: snapshot } = deletes()[0].params;
     assert.equal(chat, 1);
-    for (const id of [800, 801, 802, 805, 807, 809, 810, 812]) assert.ok(snapshot.includes(id), 'Missing eligible message ' + id);
-    assert.ok(!snapshot.some(id => [803, 804, 806, 808, 811, 813, home.message_id, later.message_id].includes(id)));
+    for (const id of [home.message_id, 800, 801, 802, 805, 807, 809, 810, 812])
+      assert.ok(snapshot.includes(id), 'Missing eligible message ' + id);
+    assert.ok(!snapshot.some(id => [803, 804, 806, 808, 811, 813, later.message_id].includes(id)));
     assert.equal(history.entries[String(later.message_id)].removed, undefined);
     assert.equal(f.inbox.get(item.id).status, 'open');
     const beforeRefresh = f.calls.length;
     await f.assistant.controls.refreshChoiceMarkup(item);
     assert.deepEqual(f.calls.slice(beforeRefresh).map(c => c.params.message_id), [808]);
     const panel = f.inbox.data.panels[home.message_id];
-    assert.equal(panel.view, 'home');
-    assert.match(JSON.parse(panel.signature)[0], /Recent messages cleared/);
-    const next = buttons().find(b => b.text === 'Clear chat').callback_data;
-    assert.notEqual(next, action);
+    assert.equal(panel.cleanup.status, 'deleted');
+    assert.equal(f.inbox.data.homePanelId, undefined);
+    assert.equal(f.sent.at(-1).message, later, 'cleanup sends no replacement menu');
     await f.callback(action, home);
+    await f.callback('ctl:home', home);
     assert.equal(deletes().length, 1, 'a queued repeat tap cannot clear replies that arrived during the first clear');
-    assert.ok(!buttons().some(b => b.text === 'Cancel' || b.callback_data.startsWith('ctl:clear-confirm:')));
+    assert.equal(f.sent.at(-1).message, later, 'a queued Home tap cannot repopulate the chat');
   } finally { f.cleanup(); }
 });
 
@@ -1395,10 +1396,13 @@ test('the native menu clear command clears itself and a stale Home button cannot
     const batches = () => f.calls.filter(c => c.method === 'deleteMessages');
     assert.equal(batches().length, 1);
     assert.deepEqual(new Set(batches()[0].params.message_ids), new Set([home.message_id, 9500]));
-    assert.notEqual(f.inbox.data.homePanelId, String(home.message_id));
+    assert.equal(f.inbox.data.homePanelId, undefined);
+    assert.equal(f.sent.length, 1, 'the command clears its own message without sending Home');
     await f.assistant.send('New reply');
     await f.callback(oldClear.callback_data, home);
     assert.equal(batches().length, 1);
+    await ownerReply(f, 9600, '/menu');
+    assert.equal(f.sent.length, 3, 'Home can still be opened explicitly');
     await f.assistant.registerMenu();
     const menu = f.calls.find(c => c.method === 'setMyCommands').params;
     assert.deepEqual(menu.scope, { type: 'chat', chat_id: 1 });
@@ -1424,11 +1428,15 @@ test('an old or interrupted Clear chat keyboard refreshes without deleting again
     assert.notEqual(action, interruptedRender);
     const call = f.assistant.telegram.call;
     f.assistant.telegram.call = async (method, params) => {
-      if (method === 'editMessageText') throw Error('Could not refresh Home');
-      return call(method, params);
+      const result = await call(method, params);
+      if (method === 'deleteMessages') throw Error('Telegram unavailable');
+      return result;
     };
-    await assert.rejects(f.callback(action, home), /Could not refresh/);
+    const before = f.sent.length;
+    await f.callback(action, home);
+    assert.equal(f.sent.length, before);
     assert.equal(deletes().length, 1);
+    assert.match(f.calls.filter(c => c.method === 'answerCallbackQuery').at(-1).params.text, /retry/);
     f.assistant.telegram.call = call;
     await f.assistant.send('A new reply after the clear');
     await f.callback(action, home);
@@ -1439,6 +1447,311 @@ test('an old or interrupted Clear chat keyboard refreshes without deleting again
     f.inbox.data.nextReplyMessageId = '555';
     await f.callback('ctl:clear-confirm:legacy', home);
     assert.equal(f.inbox.data.nextReplyMessageId, '555');
+  } finally { f.cleanup(); }
+});
+
+test('clearing before the introduction leaves the chat empty until it gets a new message', async () => {
+  const f = fixture(); try {
+    await ownerReply(f, 9700, '/clear_chat');
+    await f.assistant.controls.introduce();
+    await f.assistant.controls.flush();
+    assert.equal(f.sent.length, 0);
+    assert.ok(new StateStore(f.store.file).data.inbox.announcement, 'restart cannot recreate the introduction');
+    await f.assistant.send('A new Codex reply');
+    assert.deepEqual(f.sent.map(entry => entry.text), ['A new Codex reply']);
+  } finally { f.cleanup(); }
+});
+
+test('Clear chat keeps the chosen alert mode and sends no replacement menu', async () => {
+  for (const mode of ['auto', 'always', 'paused']) {
+    const f = fixture();
+    try {
+      f.assistant.controls.activity.setMode(mode);
+      await ownerReply(f, 9730, '/clear_chat');
+      assert.equal(new StateStore(f.store.file).data.inbox.settings.notificationMode, mode);
+      assert.equal(f.sent.length, 0);
+
+      f.advance(31 * 60_000);
+      f.put('new-alert', 'input');
+      await f.scan();
+      if (mode === 'paused') assert.equal(f.sent.length, 0);
+      else assert.match(f.sent.at(-1).text, /new-alert/);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('a paused listener skips the automatic Home introduction', async () => {
+  const f = fixture();
+  try {
+    f.assistant.controls.activity.setMode('paused');
+    await f.assistant.controls.introduce();
+    assert.equal(f.sent.length, 0);
+    await ownerReply(f, 9732, '/menu');
+    assert.equal(f.sent.length, 1);
+  } finally { f.cleanup(); }
+});
+
+test('pausing during an automatic notification stops its pending attachments', async () => {
+  const f = fixture();
+  let release, scan;
+  try {
+    const image = join(f.dir, 'proof.png');
+    writeFileSync(image, outgoingPng);
+    const h = f.put('alert-upload');
+    h.thread.cwd = f.dir;
+    h.turns[0].items[0].text = `An update.\n![Proof](<${image}>)`;
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const send = f.assistant.telegram.send;
+    f.assistant.telegram.send = async (...args) => {
+      const result = await send(...args);
+      entered();
+      await gate;
+      return result;
+    };
+    let uploads = 0;
+    f.assistant.telegram.sendImages = async () => { uploads++; return []; };
+    scan = f.scan();
+    await waiting;
+    f.assistant.controls.activity.setMode('paused');
+    release();
+    await scan;
+    assert.equal(uploads, 0);
+    assert.equal(f.sent.length, 1);
+  } finally {
+    release?.();
+    await scan;
+    f.cleanup();
+  }
+});
+
+test('a scheduled reminder stays quiet when its original direct result was requested in Telegram', async () => {
+  const f = fixture();
+  try {
+    const h = f.put('direct-reminder');
+    h.turns[0].status = 'failed';
+    const marker = 'Owner replied in Telegram [request 9734]';
+    h.turns[0].items.unshift({ type: 'userMessage', content: [{ type: 'text', text: marker }] });
+    f.store.data.desktopSubmissions['9734'] = { threadId: 'direct-reminder', requestMarker: marker, status: 'submitted' };
+    await f.scan();
+    const [item] = f.inbox.list();
+    assert.equal(item.route.direct, true);
+    assert.equal(f.sent.length, 1);
+    assert.ok(f.inbox.snooze(item.id));
+    f.assistant.controls.activity.setMode('paused');
+    f.advance(60 * 60_000 + 1);
+    item.observedAt = f.inbox.now();
+    f.monitor.health = { status: 'connected', lastScanAt: new Date(f.inbox.now()).toISOString() };
+    await f.assistant.controls.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(item.reminder, 'pending');
+  } finally { f.cleanup(); }
+});
+
+test('pausing while a released direct reminder is preparing files stops it before delivery', async () => {
+  const f = fixture();
+  let release, pending;
+  try {
+    const image = join(f.dir, 'proof.png');
+    writeFileSync(image, outgoingPng);
+    const text = `Failed.\n![Proof](<${image}>)`;
+    const item = f.inbox.observe('direct-reminder-preparing', {
+      source: 'desktop', kind: 'failure', label: 'General', text, imageSource: text,
+      route: { threadId: 'direct', hostId: 'local', direct: true },
+      delivery: 'held', reminder: 'pending', snoozedUntil: f.inbox.now() - 1
+    });
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    f.tools.read = async () => {
+      entered();
+      await gate;
+      return { thread: { id: 'direct', cwd: f.dir } };
+    };
+    pending = f.assistant.controls.flushHeld();
+    await waiting;
+    f.assistant.controls.activity.setMode('paused');
+    release();
+    await pending;
+    assert.equal(f.sent.length, 0);
+    assert.equal(item.reminder, 'pending');
+  } finally {
+    release?.();
+    await pending;
+    f.cleanup();
+  }
+});
+
+test('Clear chat preserves a reply that arrives while an earlier menu action is pending', async () => {
+  const f = fixture();
+  let release;
+  try {
+    await f.say('/menu');
+    const home = f.sent[0].message;
+    const action = f.sent[0].keyboard.inline_keyboard.flat().find(b => b.text === 'Clear chat').callback_data;
+    f.assistant.controls.queuePanel(() => new Promise(resolve => { release = resolve; }));
+    const clear = f.callback(action, home);
+    await new Promise(resolve => setImmediate(resolve));
+    const [reply] = await f.assistant.send('New reply while a menu refresh finishes');
+    release();
+    await clear;
+    const batch = f.calls.find(c => c.method === 'deleteMessages').params.message_ids;
+    assert.deepEqual(batch, [home.message_id]);
+    assert.equal(f.sent.at(-1).message, reply);
+  } finally { release?.(); f.cleanup(); }
+});
+
+test('Clear chat also removes an introduction that was already being sent', async () => {
+  const f = fixture();
+  let release, entered, introduction, clear;
+  try {
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const send = f.assistant.telegram.send;
+    f.assistant.telegram.send = async (...args) => {
+      if (args[1].startsWith('Home\n')) { entered(); await gate; }
+      return send(...args);
+    };
+    introduction = f.assistant.controls.introduce();
+    await waiting;
+    clear = ownerReply(f, 9750, '/clear_chat');
+    const [reply] = await f.assistant.send('New message during startup');
+    release();
+    await Promise.all([clear, introduction]);
+    const home = f.sent.find(entry => entry.text.startsWith('Home\n')).message;
+    const batch = f.calls.find(c => c.method === 'deleteMessages').params.message_ids;
+    assert.deepEqual(new Set(batch), new Set([9750, home.message_id]));
+    assert.notEqual(reply.message_id, home.message_id);
+    assert.equal(f.inbox.data.homePanelId, undefined);
+    assert.equal(f.sent.length, 2);
+  } finally {
+    release?.();
+    await Promise.allSettled([clear, introduction]);
+    f.cleanup();
+  }
+});
+
+test('a Home callback queued during deletion cannot recreate a cleared notice', async () => {
+  const f = fixture();
+  let release, clear, home;
+  try {
+    const [notice] = await f.assistant.send('A prior result', undefined,
+      { inline_keyboard: [[{ text: 'Home', callback_data: 'ctl:home' }]] });
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const call = f.assistant.telegram.call;
+    f.assistant.telegram.call = async (method, payload) => {
+      if (method === 'deleteMessages') { entered(); await gate; }
+      return call(method, payload);
+    };
+    clear = ownerReply(f, 9760, '/clear_chat');
+    await waiting;
+    home = f.callback('ctl:home', notice);
+    release();
+    await Promise.all([clear, home]);
+    assert.equal(f.sent.length, 1, 'only the cleared notice was ever sent');
+  } finally {
+    release?.();
+    await Promise.allSettled([clear, home]);
+    f.cleanup();
+  }
+});
+
+test('a failed clear invalidates the button on a Home panel that was still being sent', async () => {
+  const f = fixture();
+  let release, introduction, clear, savedAction;
+  try {
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const send = f.assistant.telegram.send;
+    const call = f.assistant.telegram.call;
+    f.assistant.telegram.send = async (...args) => { entered(); await gate; return send(...args); };
+    f.assistant.telegram.call = async (method, payload) => {
+      if (method !== 'deleteMessages') return call(method, payload);
+      const saved = new StateStore(f.store.file).data.inbox;
+      savedAction = saved.panels[saved.homePanelId]?.clearAction;
+      await call(method, payload);
+      throw new Error('Uncertain Telegram outcome');
+    };
+    introduction = f.assistant.controls.introduce();
+    await waiting;
+    clear = ownerReply(f, 9770, '/clear_chat');
+    release();
+    await Promise.all([clear, introduction]);
+    assert.equal(savedAction, '', 'the late Home button is invalidated on disk before deletion');
+    const [home] = f.sent;
+    const button = home.keyboard.inline_keyboard.flat().find(b => b.text === 'Clear chat');
+    await f.callback(button.callback_data, home.message);
+    assert.equal(f.calls.filter(c => c.method === 'deleteMessages').length, 1);
+    assert.equal(f.sent.length, 1);
+  } finally {
+    release?.();
+    await Promise.allSettled([clear, introduction]);
+    f.cleanup();
+  }
+});
+
+test('a clear invalidates any Home button restored by an earlier edit of the same message', async () => {
+  const f = fixture();
+  let release, edit, clear, savedAction;
+  try {
+    await f.say('/menu');
+    const home = f.sent[0].message;
+    delete f.inbox.data.panels[home.message_id].clearAction;
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const call = f.assistant.telegram.call;
+    f.assistant.telegram.call = async (method, payload) => {
+      if (method === 'editMessageText') { entered(); await gate; }
+      if (method === 'deleteMessages') {
+        savedAction = new StateStore(f.store.file).data.inbox.panels[home.message_id].clearAction;
+        throw new Error('Uncertain Telegram outcome');
+      }
+      return call(method, payload);
+    };
+    edit = f.assistant.controls.open('home', home);
+    await waiting;
+    clear = ownerReply(f, 9780, '/clear_chat');
+    release();
+    await Promise.all([clear, edit]);
+    assert.equal(savedAction, '');
+    assert.equal(f.sent.length, 1);
+  } finally {
+    release?.();
+    await Promise.allSettled([clear, edit]);
+    f.cleanup();
+  }
+});
+
+test('a failed command consumes the old Clear button and an already deleted panel cannot reopen Home', async () => {
+  const f = fixture();
+  try {
+    await f.say('/menu');
+    const old = f.sent.at(-1).message;
+    await f.assistant.controls.dismissPanel(old);
+    await f.say('/menu');
+    const current = f.sent.at(-1);
+    const action = current.keyboard.inline_keyboard.flat().find(b => b.text === 'Clear chat').callback_data;
+    const call = f.assistant.telegram.call;
+    let fail = true;
+    f.assistant.telegram.call = async (method, payload) => {
+      const result = await call(method, payload);
+      if (method === 'deleteMessages' && fail) { fail = false; throw new Error('Uncertain Telegram outcome'); }
+      return result;
+    };
+    await ownerReply(f, 9800, '/clear_chat');
+    const [reply] = await f.assistant.send('An independent result');
+    await f.callback(action, current.message);
+    assert.equal(f.calls.filter(c => c.method === 'deleteMessages').length, 1);
+    assert.equal(f.sent.at(-1).message, reply);
+    await ownerReply(f, 9801, '/clear_chat');
+    const before = f.sent.length;
+    await f.callback('ctl:home', old);
+    assert.equal(f.sent.length, before);
   } finally { f.cleanup(); }
 });
 

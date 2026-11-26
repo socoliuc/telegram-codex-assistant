@@ -35,7 +35,7 @@ On a CLI-only installation, add your project folders to give **Auto** destinatio
 | **Home** · `/menu` | Shows the current destination and cancels a pending one-message reply. |
 | **Chats** · `/chats` | Choose a project and tap a Codex chat to open it. Type to continue it, or tap **Back** or **Home** to leave. |
 | **General** · `/general` | Switches Home to General for new messages. |
-| **Clear chat** · `/clear_chat` | Clears recent Telegram messages from both sides in one tap and shows Home. |
+| **Clear chat** · `/clear_chat` | Clears recent Telegram messages from both sides, including Home. Use `/menu` to reopen Home when you want it. |
 | **Inbox** · `/inbox` | Opens requests that need attention. Choose an offered answer or open a task to reply. |
 | **Routing** · `/project` | Pins a project for new messages. Select **Auto** to route each new message independently. Find Routing under **More**. |
 | **Running** · `/status` | Lists current desktop activity and work requested through Telegram. |

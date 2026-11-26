@@ -12,6 +12,10 @@ import { imageReferences, prepareImages, renderAttachedImages } from './outgoing
 
 const button = (text, action) => ({ text, callback_data: 'ctl:' + action });
 const homeButton = button('Home', 'home');
+const mediaDeliveryNote = item => ({
+  unknown: '\n\nImage delivery is unconfirmed; it has not been retried.',
+  partial: '\n\nOpen the original reply in Codex for the remaining images.'
+})[item.mediaDelivery?.status] || '';
 const moreButton = button('‹ More', 'more');
 
 export const unconfirmedReply = 'awaiting-details-delivery';
@@ -58,9 +62,9 @@ export class Controls {
   }
   help(text) { return this.housekeeping.notice(text); }
   receipt(text) { return this.housekeeping.notice(text, { clearAfterMs: 5000 }); }
-  acknowledge(q) {
+  acknowledge(q, text) {
     // The client spinner can expire independently of the actual action.
-    void this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id }).catch(() => {});
+    void this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id, ...(text ? { text } : {}) }).catch(() => {});
   }
   async confirm(q, text) {
     try { await this.a.telegram.call('answerCallbackQuery', { callback_query_id: q.id,
@@ -79,7 +83,7 @@ export class Controls {
       message.chat?.id === this.store.data.owner.chatId && message.chat?.type === 'private' &&
       !message.forward_origin && !message.forward_from && !message.sender_chat);
   }
-  open(view = 'home', message, afterMessageId = 0, notice = '') {
+  open(view = 'home', message, afterMessageId = 0, sourceId = message?.message_id) {
     const leavingChat = ['home', 'general', 'browse'].includes(view);
     const previousChat = leavingChat && this.store.data.activeChat;
     if (leavingChat) this.clearReplyDestination();
@@ -93,6 +97,7 @@ export class Controls {
       this.store.save();
     }
     const run = async () => {
+      if (sourceId && this.controlRemoved(String(sourceId))) return;
       const explicit = this.inbox.data.panels[String(message?.message_id)];
       let target = explicit && explicit.view !== 'digest' ? message : this.activePanel();
       if (target && this.inbox.data.panels[String(target.message_id)]?.dismissedAt) return;
@@ -106,7 +111,7 @@ export class Controls {
       const projects = /^projects(?::(\d+))?$/.exec(view);
       const render = () => view === 'browse' ? this.a.chats.projects(target) :
         projects ? this.a.showProjectPicker(target, Number(projects[1] || 0)) :
-          this.show(view === 'general' ? 'home' : view, target, true, notice);
+          this.show(view === 'general' ? 'home' : view, target, true);
       let id;
       try { id = await render(); }
       catch (error) {
@@ -197,7 +202,7 @@ export class Controls {
     const footer = item.nativeAnswerState === 'collected' ? 'Saved. Waiting for the remaining answers before sending to Codex.' :
       ['sending', 'unknown'].includes(item.nativeAnswerState) ? 'Answer delivery is unconfirmed. Check Codex before retrying.' :
       submitted ? 'Your answer was sent. Waiting for Codex to reflect it.' : 'Choose an answer below, or reply in your own words.';
-    const media = item.mediaDelivery?.status === 'unknown' ? '\n\nImage delivery is unconfirmed; it has not been retried.' : '';
+    const media = mediaDeliveryNote(item);
     const skipped = item.imageSkipped ? `\n\n${item.imageSkipped} ${item.imageSkipped === 1 ? 'image could' : 'images could'} not be attached. See the original reply in Codex.` : '';
     return renderAttachedImages(`${alertHeading(item, submitted ? 'Answer sent' : 'Question')}\n\n${questions}\n\n${footer}${media}${skipped}`, item.mediaDelivery?.sources || []);
   }
@@ -227,7 +232,7 @@ export class Controls {
     item.delivery = 'inbox'; item.ageSuppressedAt ||= this.inbox.now();
     this.store.data.notices[item.key] = 'inbox'; this.store.save(); return true;
   }
-  async notify(item, keyboard, onDelivered, { heldRelease = false } = {}) {
+  async notify(item, keyboard, onDelivered, { heldRelease = false, reminder = false } = {}) {
     this.activity.refresh();
     if (this.suppressOld(item)) return;
     if (this.activity.blocks(item)) {
@@ -243,7 +248,7 @@ export class Controls {
     try {
       await this.sendItem(item, '', keyboard || this.buttons(item), (message, metadata) => {
         this.record(item, message, metadata); onDelivered?.(message);
-      }, { silent: policy === 'silent', brief, proactive: true, heldRelease, claim });
+      }, { silent: policy === 'silent', brief, proactive: true, heldRelease, reminder, claim });
       if (item.deliveryClaim === claim && item.delivery === 'sending') item.delivery = 'delivered';
     } catch (e) { if (item.deliveryClaim === claim) item.delivery = 'unknown'; throw e; }
     finally { this.store.save(); }
@@ -296,14 +301,16 @@ export class Controls {
     } catch (error) { if (held && item.deliveryClaim === claim) item.delivery = 'unknown'; throw error; }
     finally { if (held && item.deliveryClaim === claim) { this.store.data.notices[item.key] = item.delivery; this.store.save(); } }
   }
-  async sendItem(item, status, keyboard, record, { silent = false, brief = false, proactive = false, heldRelease = false, claim, replyPrompt = false } = {}) {
+  async sendItem(item, status, keyboard, record, { silent = false, brief = false, proactive = false, heldRelease = false, reminder = false, claim, replyPrompt = false } = {}) {
     const source = item.imageSource || '';
     const display = this.forDisplay(item);
     let prepared, body = alertBody(display), renderedSource = source;
     const replyTo = proactive ? item.route?.telegramReplyTo || this.store.data.jobs[item.jobId]?.telegramReplyTo : undefined;
     const chatReply = replyTo && item.kind === 'completion' && source && !status;
     if (chatReply && item.source === 'desktop') body = (display.displayLabel || item.label) + '\n\n' + source;
-    const attempted = () => ['sending', 'delivered', 'unknown'].includes(item.mediaDelivery?.status);
+    const attempted = () => ['sending', 'delivered', 'unknown', 'partial'].includes(item.mediaDelivery?.status);
+    const maySend = proactive && (reminder || (item.source === 'desktop' && !item.route?.direct)) ?
+      () => this.activity.mode !== 'paused' : undefined;
     if (item.kind !== 'approval' && !attempted() && imageReferences(source).length) {
       const job = this.store.data.jobs[item.jobId];
       let roots = item.source === 'desktop' ? item.route?.imageRoots || item.imageRoots : job?.imageRoots || job?.roots;
@@ -324,7 +331,7 @@ export class Controls {
     if (questionText) body = renderAttachedImages(questionText, prepared?.sources || item.mediaDelivery?.sources || []);
     if (brief && !chatReply && body.length > 800) body = body.slice(0, 700) + '\n\nTap Open & reply for the full update.';
     if (!questionText && prepared?.skipped) body += `\n\n${prepared.skipped} ${prepared.skipped === 1 ? 'image could' : 'images could'} not be attached. See the original reply in Codex.`;
-    if (!questionText && item.mediaDelivery?.status === 'unknown') body += '\n\nImage delivery is unconfirmed; it has not been retried.';
+    if (!questionText) body += mediaDeliveryNote(item);
     const text = body + (questionText ? '' : status) + (replyPrompt ? '\n\nType your reply here, or tap Home to cancel.' : '');
     // Preparation can await image files or native source metadata. Recheck
     // activity before sending in case the owner returned to Codex meanwhile.
@@ -335,7 +342,7 @@ export class Controls {
         item.delivery = 'inbox'; this.store.save(); return [];
       }
       if (this.suppressOld(item)) return [];
-      if (this.a.stopping || this.activity.blocks(item) || (heldRelease &&
+      if (this.a.stopping || this.activity.blocks(item) || maySend?.() === false || (heldRelease &&
           (this.inbox.now() - item.observedAt >= 120_000 || item.snoozedUntil > this.inbox.now()))) {
         item.delivery = 'held'; item.heldAt ||= this.inbox.now(); this.store.save(); return [];
       }
@@ -346,28 +353,30 @@ export class Controls {
     const recordText = (message, multipart = false) => record?.(message,
       { multipart, ...(keyboard?.force_reply ? { forceReply: true } : {}) });
     const messages = await this.a.send(text, item.jobId, keyboard,
-      message => recordText(message, multipart), { silent, replyTo });
-    if (!prepared?.images.length || attempted() || !messages.length || this.a.stopping) return messages;
+      message => recordText(message, multipart), { silent, replyTo, maySend });
+    if (!prepared?.images.length || attempted() || !messages.length || this.a.stopping || maySend?.() === false) return messages;
     // Text/controls are already delivered. Claim the entire media operation
     // before upload; a concurrent Details view or restart cannot replay it.
     item.mediaDelivery = { status: 'sending', at: this.inbox.now(), count: prepared.images.length, sources: prepared.sources, messageIds: [] };
     this.store.save();
     try {
-      await this.a.telegram.sendImages(this.store.data.owner.chatId, prepared.images, display.displayLabel || item.label || 'Codex', messages[0].message_id, message => {
+      const uploaded = await this.a.telegram.sendImages(this.store.data.owner.chatId, prepared.images, display.displayLabel || item.label || 'Codex', messages[0].message_id, message => {
         const id = String(message.message_id);
         item.mediaDelivery.messageIds.push(id);
         item.mediaMessageIds = [...(item.mediaMessageIds || []), id];
         if (item.jobId) this.store.data.replies[id] = item.jobId;
         this.record(item, message);
-      });
-      item.mediaDelivery.status = 'delivered';
+      }, { maySend });
+      item.mediaDelivery.status = uploaded.length < prepared.images.length ? 'partial' : 'delivered';
     } catch {
       item.mediaDelivery.status = 'unknown'; this.store.save();
-      try { await this.a.send('The text arrived, but image delivery could not be confirmed. I haven’t retried the images.', item.jobId, keyboard, recordText, { silent: true }); } catch {}
+      if (maySend?.() !== false) {
+        try { await this.a.send('The text arrived, but image delivery could not be confirmed. I haven’t retried the images.', item.jobId, keyboard, recordText, { silent: true, maySend }); } catch {}
+      }
     } finally { this.store.save(); }
     return messages;
   }
-  async show(view = 'home', message, explicit = false, notice = '') {
+  async show(view = 'home', message, explicit = false) {
     this.syncJobs();
     let text, rows, cleanupOffer, clearAction;
     const settings = this.inbox.data.settings;
@@ -388,10 +397,11 @@ export class Controls {
       const destination = selected?.name || (this.store.data.selectedProjectId ? 'Unavailable project' :
         this.store.data.generalDestination ? 'General' : 'Auto');
       text = `Home\nSend to: ${destination}\n\n` + (this.store.data.selectedProjectId && !selected ? 'Choose a different destination.' :
-        'Type a message below.') + (notice ? '\n\n' + notice : '');
+        'Type a message below.');
       rows = [[button('Chats', 'browse'), button('General', 'general')],
         [button(attention.length ? `Inbox (${attention.length})` : 'Inbox', 'attention:0'), button('Updates', 'updates:0')],
         [button('Running', 'running'), button('More', 'more')], [button('Clear chat', clearAction)]];
+      if (this.activity.mode === 'paused') rows.push([button('Alerts off', 'settings')]);
     } else if (view === 'more') {
       text = 'More\n\nAlerts: ' + this.activity.status().label;
       rows = [[button('Routing', 'projects'), button('Alert settings', 'settings')],
@@ -417,7 +427,7 @@ export class Controls {
     } else if (view === 'settings') {
       const projectId = selected?.id || 'general';
       const muted = settings.mutedProjects.includes(projectId);
-      text = `Notification settings\n\nTelegram alerts: ${this.activity.status().label}\nAutomatic pauses proactive alerts after a submitted Codex message and resumes after 30 minutes. Held items stay in the inbox; only notifications from the last 30 minutes are sent when alerts resume.\n\nRoutine desktop updates: ${settings.routine === 'inbox' ? 'inbox only' : settings.routine === 'digest' ? 'hourly digest' : settings.routine}\nQuiet hours: ${settings.quiet ? '23:00–08:00' : 'off'} (${settings.timeZone})\nQuestions and failures during quiet hours: ${settings.urgentDuringQuiet ? 'notify normally' : 'send silently'}\nUpdate length: ${settings.detail}\nRoutine alerts for ${selected?.name || 'General'}: ${muted ? 'inbox only' : 'follow defaults'}\n\nQuestions and failures remain in the inbox. Your direct Telegram conversations always work.`;
+      text = `Notification settings\n\nTelegram alerts: ${this.activity.status().label}\nAutomatic pauses proactive alerts for 30 minutes after you send a message in Codex. While alerts are paused, open Inbox or Updates to check new activity. Choose Automatic or Always send to turn alerts back on.\n\nRoutine desktop updates: ${settings.routine === 'inbox' ? 'inbox only' : settings.routine === 'digest' ? 'hourly digest' : settings.routine}\nQuiet hours: ${settings.quiet ? '23:00–08:00' : 'off'} (${settings.timeZone})\nQuestions and failures during quiet hours: ${settings.urgentDuringQuiet ? 'notify normally' : 'send silently'}\nUpdate length: ${settings.detail}\nRoutine alerts for ${selected?.name || 'General'}: ${muted ? 'inbox only' : 'follow defaults'}\n\nQuestions and failures remain in the inbox. Your direct Telegram conversations always work.`;
       rows = [[button('Automatic · 30m', 'notify:auto'), button('Always send', 'notify:always'), button('Pause alerts', 'notify:paused')],
         [button('Immediate', 'mode:immediate'), button('Silent', 'mode:silent')],
         [button('Hourly digest', 'mode:digest'), button('Inbox only', 'mode:inbox')],
@@ -582,27 +592,30 @@ export class Controls {
     })().finally(() => this.cleaning.delete(key));
     this.cleaning.set(key, pending); return pending;
   }
+  controlRemoved(id) {
+    return this.history.entries[id]?.removed || ['deleted', 'missing'].includes(this.inbox.data.panels[id]?.cleanup?.status);
+  }
   async callback(q) {
     const action = String(q.data).slice(4), [verb, value] = action.split(':');
+    const id = String(q.message?.message_id), panel = this.inbox.data.panels[id];
+    if (this.controlRemoved(id)) return this.acknowledge(q);
     if (verb === 'answer') return this.answer(q, action);
     if (verb === 'clean') return this.runCleanup(q, value, action.split(':')[2]);
     if (verb === 'clear-chat') {
-      const id = String(q.message?.message_id), panel = this.inbox.data.panels[id];
-      this.acknowledge(q);
-      if (!panel || panel.view !== 'home' || panel.dismissedAt || this.inbox.data.homePanelId !== id || this.clearingChat) return;
+      if (!panel || panel.view !== 'home' || panel.dismissedAt || this.inbox.data.homePanelId !== id || this.clearingChat)
+        return this.acknowledge(q);
       if (!panel.clearAction) {
+        this.acknowledge(q);
         return this.queuePanel(() => this.show('home', q.message));
       }
       // A queued tap from the previous keyboard must not clear a fresh reply.
       if (action === panel.clearAction) {
-        panel.clearAction = '';
-        this.store.save();
-        await this.clearChat(q.message);
+        const { remaining } = await this.clearChat();
+        return this.acknowledge(q, remaining ? 'Some recently sent messages remain. Use /clear_chat to retry.' : undefined);
       }
-      return;
+      return this.acknowledge(q);
     }
     if (verb === 'clear-confirm') {
-      const id = String(q.message?.message_id), panel = this.inbox.data.panels[id];
       this.acknowledge(q);
       if (panel?.view === 'clear-chat' && !panel.dismissedAt && this.inbox.data.homePanelId === id) {
         return this.queuePanel(() => this.show('home', q.message));
@@ -611,12 +624,9 @@ export class Controls {
     }
     if (action === 'home') {
       this.acknowledge(q);
-      const panel = this.inbox.data.panels[String(q.message?.message_id)];
-      if (panel?.dismissedAt) return this.open('home');
-      return panel ? this.open('home', q.message) : this.open('home', undefined, q.message?.message_id);
+      if (panel?.dismissedAt) return this.open('home', undefined, 0, id);
+      return panel ? this.open('home', q.message) : this.open('home', undefined, q.message?.message_id, id);
     }
-    const id = String(q.message?.message_id);
-    const panel = this.inbox.data.panels[id];
     if (!panel && ['item', 'review', 'review-clear', 'snooze'].includes(verb)) {
       const item = this.inbox.get(value);
       const ownCard = this.isBotMessage(q.message) && /^[1-9]\d*$/.test(id) &&
@@ -671,15 +681,33 @@ export class Controls {
     }
     return this.open(action, q.message);
   }
-  async clearChat(menu, commandId) {
+  async clearChat() {
     if (this.clearingChat) return this.clearingChat;
-    const targets = this.history.targets(menu?.message_id);
-    this.clearingChat = (async () => {
-      const { accepted, remaining } = await this.history.clear(targets, this.a.telegram);
-      const result = remaining ? 'Some recent messages remain. Tap Clear chat to retry.' :
-        accepted ? 'Recent messages cleared.' : 'No recent messages to clear.';
-      return this.open('home', menu, commandId, result + ' Use Telegram’s Clear History for anything left.');
-    })();
+    const targets = this.history.targets();
+    const previousHome = this.inbox.data.homePanelId;
+    const panel = this.inbox.data.panels[previousHome];
+    if (panel?.view === 'home') panel.clearAction = '';
+    this.inbox.data.announcement ||= 'dismissed';
+    this.clearReplyDestination();
+    delete this.store.data.activeChat;
+    this.store.save();
+    this.clearingChat = this.queuePanel(async () => {
+      const home = this.inbox.data.homePanelId;
+      const current = this.inbox.data.panels[home];
+      if (current?.view === 'home' && current.clearAction) {
+        current.clearAction = '';
+        this.store.save();
+      }
+      // An earlier queued menu may have finished opening after the tap. Keep
+      // it in scope without adding normal replies delivered during the wait.
+      if (home && home !== previousHome && !targets.includes(home)) targets.push(home);
+      const result = await this.history.clear(targets, this.a.telegram);
+      if (this.inbox.data.panels[home]?.dismissedAt) {
+        delete this.inbox.data.homePanelId;
+        this.store.save();
+      }
+      return result;
+    });
     try { return await this.clearingChat; }
     finally { this.clearingChat = null; }
   }
@@ -877,13 +905,14 @@ export class Controls {
       }
       if (this.suppressOld(item)) continue;
       if (sent >= 1 || this.a.stopping || this.activity.blocks(item) || item.snoozedUntil > this.inbox.now()) continue;
+      const reminder = item.reminder === 'pending';
+      if (reminder && this.activity.mode === 'paused') continue;
       // Releasing a held alert requires a recent observation of that source,
       // so an unavailable history cannot resurrect an already answered request.
       if (this.inbox.now() - item.observedAt >= 120_000) continue;
       sent++;
-      const reminder = item.reminder === 'pending';
       if (reminder) { item.reminder = 'sending'; this.store.save(); }
-      try { await this.notify(item, undefined, undefined, { heldRelease: true }); }
+      try { await this.notify(item, undefined, undefined, { heldRelease: true, reminder }); }
       catch { /* An unknown outcome stays claimed and is never replayed. */ }
       if (reminder) item.reminder = ['delivered', 'unknown'].includes(item.delivery) ? item.delivery :
         isVisible(item) ? 'pending' : 'cancelled';
@@ -895,16 +924,17 @@ export class Controls {
     await this.flushCleanup();
     // Only a still-fresh observation justifies a reminder that needs action.
     const fresh = this.a.desktop?.health?.status === 'connected' && now - Date.parse(this.a.desktop.health.lastScanAt) < 120_000;
-    for (const item of Object.values(this.inbox.data.items)) if (fresh && item.delivery !== 'held' && !this.activity.blocks(item) && now - item.observedAt < 120_000 && isVisible(item) && item.reminder === 'pending' && item.snoozedUntil <= now) {
+    const maySendReminder = () => this.activity.mode !== 'paused';
+    for (const item of Object.values(this.inbox.data.items)) if (fresh && maySendReminder() && item.delivery !== 'held' && !this.activity.blocks(item) && now - item.observedAt < 120_000 && isVisible(item) && item.reminder === 'pending' && item.snoozedUntil <= now) {
       item.reminder = 'sending'; this.store.save();
       const text = `Reminder · ${this.questionText(item) || item.text}`;
       const multipart = splitText(redact(text, [this.a.telegram.token])).length > 1;
       try { await this.a.send(text, item.jobId, this.buttons(item), m => this.record(item, m, { multipart }),
-        { silent: this.inbox.quietNow() && !this.inbox.data.settings.urgentDuringQuiet }); item.reminder = 'delivered'; }
+        { silent: this.inbox.quietNow() && !this.inbox.data.settings.urgentDuringQuiet, maySend: maySendReminder }); item.reminder = 'delivered'; }
       catch { item.reminder = 'unknown'; }
       this.store.save();
     }
-    if (this.inbox.quietNow()) return;
+    if (this.activity.mode === 'paused' || this.inbox.quietNow()) return;
     const queued = Object.values(this.inbox.data.items).filter(item => item.delivery === 'digest');
     for (const item of queued) if (!isVisible(item) || this.inbox.policy(item) === 'inbox') item.delivery = 'inbox';
     this.store.save();
@@ -927,7 +957,7 @@ export class Controls {
     this.store.save();
   }
   async introduce() {
-    if (!this.store.data.owner || this.inbox.data.announcement || this.a.stopping) return;
+    if (!this.store.data.owner || this.inbox.data.announcement || this.a.stopping || this.activity.mode === 'paused') return;
     // Persist the claim before sending. An uncertain send is never replayed.
     this.inbox.data.announcement = 'sending'; this.store.save();
     try { await this.open('home'); this.inbox.data.announcement = 'delivered'; }

@@ -75,9 +75,10 @@ export class Telegram {
     await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
     return path;
   }
-  async send(chatId, text, replyMarkup, onDelivered, { silent = false, replyTo } = {}) {
+  async send(chatId, text, replyMarkup, onDelivered, { silent = false, replyTo, maySend } = {}) {
     const sent = [];
     for (const chunk of splitText(redact(text, [this.token]))) {
+      if (maySend && !maySend()) break;
       const parent = sent.at(-1)?.message_id || replyTo;
       const message = await this.call('sendMessage', {
         chat_id: chatId, text: chunk, link_preview_options: { is_disabled: true }, disable_notification: silent,
@@ -90,7 +91,7 @@ export class Telegram {
     }
     return sent;
   }
-  async sendImages(chatId, images, label, replyTo, onDelivered) {
+  async sendImages(chatId, images, label, replyTo, onDelivered, { maySend } = {}) {
     if (!images.length) return [];
     if (images.length > 10) throw new Error('Too many images in one update.');
     const groups = [];
@@ -100,6 +101,7 @@ export class Telegram {
     }
     const sent = [];
     for (const group of groups) {
+      if (maySend && !maySend()) break;
       const form = new FormData();
       form.set('chat_id', String(chatId)); form.set('disable_notification', 'true');
       if (replyTo) form.set('reply_parameters', JSON.stringify({ message_id: replyTo, allow_sending_without_reply: true }));

@@ -98,6 +98,24 @@ test('Telegram confirms each delivered chunk before attempting the next', async 
   } finally { server.close(); }
 });
 
+test('a delivery guard stops remaining text chunks and image groups', async () => {
+  const tg = new Telegram('fixture-token');
+  let allowed, requests;
+  tg.call = async method => {
+    requests.push(method);
+    allowed = false;
+    return { message_id: requests.length };
+  };
+  const maySend = () => allowed;
+  allowed = true; requests = [];
+  await tg.send(1, 'x'.repeat(9000), undefined, undefined, { maySend });
+  assert.deepEqual(requests, ['sendMessage']);
+  const image = { kind: 'photo', extension: 'png', bytes: Buffer.from('photo'), filename: 'photo.png', alt: 'Proof' };
+  allowed = true; requests = [];
+  await tg.sendImages(1, [image, { ...image, kind: 'document' }], 'Project', undefined, undefined, { maySend });
+  assert.deepEqual(requests, ['sendPhoto']);
+});
+
 test('outgoing photos and albums use multipart bytes, safe captions, silence and reply references', async () => {
   const requests = [], delivered = [];
   const server = createServer(async (req, res) => {

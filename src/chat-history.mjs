@@ -57,9 +57,9 @@ export class ChatHistory {
     return Boolean(entry && !entry.removed && entry.sentAt <= now && entry.sentAt > now - lifetime &&
       (!entry.eligibleAt || entry.eligibleAt < now));
   }
-  targets(exclude) {
+  targets() {
     const now = this.now(), records = this.inventory();
-    return [...records.keys()].filter(id => id !== String(exclude) && this.eligible(records, id, now));
+    return [...records.keys()].filter(id => this.eligible(records, id, now));
   }
   markRemoved(ids, records) {
     const now = this.now();

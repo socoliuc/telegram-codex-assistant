@@ -133,7 +133,8 @@ try {
   }, 1500);
   process.once('SIGINT', () => stop().catch(() => {}));
   process.once('SIGTERM', () => stop().catch(() => {}));
-  if (store.data.owner && recovered.length) await assistant.send(`Assistant restarted. Jobs ${recovered.join(', ')} need inspection before continuing. Nothing was replayed. See /status.`);
+  if (store.data.owner && recovered.length && assistant.controls.activity.mode !== 'paused')
+    await assistant.send(`Assistant restarted. Jobs ${recovered.join(', ')} need inspection before continuing. Nothing was replayed. See /status.`);
   let backoff = 1000;
   while (!stopping) {
     if (stopRequested()) { await stop(); break; }
