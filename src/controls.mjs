@@ -309,8 +309,8 @@ export class Controls {
     const chatReply = replyTo && item.kind === 'completion' && source && !status;
     if (chatReply && item.source === 'desktop') body = (display.displayLabel || item.label) + '\n\n' + source;
     const attempted = () => ['sending', 'delivered', 'unknown', 'partial'].includes(item.mediaDelivery?.status);
-    const maySend = proactive && (reminder || (item.source === 'desktop' && !item.route?.direct)) ?
-      () => this.activity.mode !== 'paused' : undefined;
+    const pauseSensitive = reminder || (item.source === 'desktop' && !item.route?.direct);
+    const maySend = proactive ? () => !item.questionPageMissing && (!pauseSensitive || this.activity.mode !== 'paused') : undefined;
     if (item.kind !== 'approval' && !attempted() && imageReferences(source).length) {
       const job = this.store.data.jobs[item.jobId];
       let roots = item.source === 'desktop' ? item.route?.imageRoots || item.imageRoots : job?.imageRoots || job?.roots;
@@ -909,7 +909,7 @@ export class Controls {
       if (reminder && this.activity.mode === 'paused') continue;
       // Releasing a held alert requires a recent observation of that source,
       // so an unavailable history cannot resurrect an already answered request.
-      if (this.inbox.now() - item.observedAt >= 120_000) continue;
+      if (item.questionPageMissing || this.inbox.now() - item.observedAt >= 120_000) continue;
       sent++;
       if (reminder) { item.reminder = 'sending'; this.store.save(); }
       try { await this.notify(item, undefined, undefined, { heldRelease: true, reminder }); }
@@ -925,12 +925,15 @@ export class Controls {
     // Only a still-fresh observation justifies a reminder that needs action.
     const fresh = this.a.desktop?.health?.status === 'connected' && now - Date.parse(this.a.desktop.health.lastScanAt) < 120_000;
     const maySendReminder = () => this.activity.mode !== 'paused';
-    for (const item of Object.values(this.inbox.data.items)) if (fresh && maySendReminder() && item.delivery !== 'held' && !this.activity.blocks(item) && now - item.observedAt < 120_000 && isVisible(item) && item.reminder === 'pending' && item.snoozedUntil <= now) {
+    for (const item of Object.values(this.inbox.data.items)) if (fresh && maySendReminder() && item.delivery !== 'held' && !item.questionPageMissing && !this.activity.blocks(item) && now - item.observedAt < 120_000 && isVisible(item) && item.reminder === 'pending' && item.snoozedUntil <= now) {
       item.reminder = 'sending'; this.store.save();
       const text = `Reminder · ${this.questionText(item) || item.text}`;
       const multipart = splitText(redact(text, [this.a.telegram.token])).length > 1;
-      try { await this.a.send(text, item.jobId, this.buttons(item), m => this.record(item, m, { multipart }),
-        { silent: this.inbox.quietNow() && !this.inbox.data.settings.urgentDuringQuiet, maySend: maySendReminder }); item.reminder = 'delivered'; }
+      try {
+        const messages = await this.a.send(text, item.jobId, this.buttons(item), m => this.record(item, m, { multipart }),
+          { silent: this.inbox.quietNow() && !this.inbox.data.settings.urgentDuringQuiet, maySend: () => maySendReminder() && !item.questionPageMissing });
+        item.reminder = messages.length ? 'delivered' : 'pending';
+      }
       catch { item.reminder = 'unknown'; }
       this.store.save();
     }

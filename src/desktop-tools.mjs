@@ -93,6 +93,9 @@ export class DesktopTools {
       }
     }
   }
+  readItems(threadId, hostId, itemCursor) {
+    return this.call('read_thread', { threadId, hostId, itemCursor, itemLimit: 100, includeOutputs: false, maxOutputCharsPerItem: 8000 });
+  }
   send(threadId, prompt, hostId = 'local') { return this.call('send_message_to_thread', { threadId, hostId, prompt }); }
   close() { this.rpc?.close(); }
 }

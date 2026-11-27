@@ -1,6 +1,6 @@
 {
   "name": "telegram-codex-assistant",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "A private Telegram control panel for Codex on Windows, macOS and Linux.",
   "license": "MIT",
   "private": true,

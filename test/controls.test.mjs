@@ -827,6 +827,113 @@ test('desktop choice clicks recheck native answers and changed options before se
   } finally { f.cleanup(); }
 });
 
+test('desktop choices verify paginated questions, later answers and changes during paging', async () => {
+  for (const mode of ['open', 'completed', 'answered on older page', 'partial answer on older page', 'final on older page',
+    'answered during read', 'new turn during read', 'new turn before tap', 'final during read']) {
+    const f = fixture(); try {
+      const h = f.put('busy-question', 'input'), turn = h.turns[0];
+      turn.items[0].text = 'Which color?\n- Blue\n- Green';
+      if (mode === 'partial answer on older page') turn.items[0].text += '\n\nWhich size?\n- Small\n- Large';
+      await f.scan();
+      const original = f.sent[0], item = f.inbox.list()[0];
+      const [question] = turn.items;
+      turn.items = Array.from({ length: 32 }, (_, index) => ({ type: 'commandExecution', id: `command-${index}` }));
+      turn.nextItemCursor = 'recent-activity';
+      if (['completed', 'final on older page'].includes(mode)) turn.status = 'completed';
+      const finalMessage = { type: 'agentMessage', id: 'final', phase: 'final_answer', text: 'The work is done.' };
+      const nativeAnswer = { type: 'userMessage', id: 'owner-answer', content: [{ type: 'text', text:
+        '<send_user_message_question_reply>' + JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', question.id, 0]),
+          question: 'Which color?', answer: 'Green' }]) + '</send_user_message_question_reply>' }] };
+      const cursors = [];
+      f.tools.readItems = async (id, hostId, cursor) => {
+        assert.equal(id, h.thread.id); assert.equal(hostId, 'local'); cursors.push(cursor);
+        if (cursor === 'recent-activity') {
+          const laterItem = mode === 'final on older page' ? finalMessage : mode.endsWith('on older page') ? nativeAnswer :
+            { type: 'commandExecution', id: 'earlier-command' };
+          return { items: [laterItem], nextItemCursor: 'earlier' };
+        }
+        if (mode === 'answered during read') { turn.items.shift(); turn.items.push(nativeAnswer); }
+        if (mode === 'new turn during read') h.turns.unshift({ id: 'new-turn', items: [] });
+        if (mode === 'final during read') {
+          turn.items.shift(); turn.items.push(finalMessage);
+          turn.status = 'completed';
+        }
+        return { items: [question] };
+      };
+      await f.scan();
+      assert.equal(item.status, 'open', mode);
+      if (mode === 'open') {
+        const lastVerified = item.observedAt;
+        f.advance(60_000); await f.scan();
+        assert.equal(item.observedAt, lastVerified, 'unchanged metadata does not refresh an omitted question');
+      }
+      assert.deepEqual(cursors, [], 'background scans keep their existing history budget');
+      if (mode === 'new turn before tap') {
+        h.turns.unshift({ id: 'new-turn', status: 'inProgress', items: [{ type: 'userMessage', id: 'other-reply',
+          content: [{ type: 'text', text: 'Owner replied in Telegram [request another-answer] to a different question' }] }] });
+        await f.scan();
+        assert.equal(item.status, 'resolved');
+        await f.callback(answerButtons(original)[0].callback_data, original.message); await f.assistant.serial;
+        assert.deepEqual(cursors, []);
+        assert.equal(f.submissions.length, 0);
+        continue;
+      }
+      await f.callback(answerButtons(original)[0].callback_data, original.message); await f.assistant.serial;
+      assert.deepEqual(cursors, ['recent-activity', 'earlier']);
+      const shouldSend = ['open', 'completed'].includes(mode);
+      assert.equal(f.submissions.length, shouldSend ? 1 : 0, mode);
+      if (mode.startsWith('answered')) assert.equal(item.resolution, 'Answered in Codex.');
+      if (mode.startsWith('final') || mode === 'new turn during read') assert.equal(item.status, 'resolved', mode);
+      if (mode === 'partial answer on older page') {
+        assert.deepEqual(item.answeredQuestionIndexes, [0]);
+        assert.equal(answerButtons({ keyboard: f.assistant.controls.buttons(item) }).length, 2);
+      }
+      if (shouldSend) {
+        assert.equal(f.submissions[0].id, h.thread.id);
+        assert.match(f.submissions[0].text, /My answer: Blue/);
+      }
+    } finally { f.cleanup(); }
+  }
+});
+
+test('an unverified older question does not release a held Telegram alert', async () => {
+  const f = fixture(); try {
+    f.assistant.controls.activity.setMode('auto');
+    const h = f.put('held-question', 'input');
+    h.turns[0].items[0].text = 'Which color?\n- Blue\n- Green';
+    await f.scan();
+    const item = f.inbox.list()[0];
+    assert.equal(item.delivery, 'held');
+    const [question] = h.turns[0].items;
+    h.turns[0].items = [{ type: 'commandExecution', id: 'later' }];
+    h.turns[0].nextItemCursor = 'earlier';
+    await f.scan();
+    assert.equal(item.status, 'open');
+    f.assistant.controls.activity.setMode('always');
+    await f.assistant.controls.flushHeld();
+    assert.equal(f.sent.length, 0);
+    h.turns[0].items.unshift(question);
+    delete h.turns[0].nextItemCursor;
+    await f.scan(); await f.assistant.controls.flushHeld();
+    assert.equal(item.delivery, 'delivered');
+    assert.equal(f.sent.length, 1);
+  } finally { f.cleanup(); }
+});
+
+test('discovery only alerts on questions that follow the final message in a completed turn', async () => {
+  const f = fixture(); try {
+    const h = f.put('completed-questions', 'input'), turn = h.turns[0];
+    turn.status = 'completed';
+    turn.items[0].text = 'Which old color?\n- Blue\n- Green';
+    turn.items.push({ type: 'agentMessage', id: 'final', phase: 'final_answer', text: 'The color work is done.' },
+      { type: 'agentMessage', id: 'call_next', phase: 'final_answer', text: 'Which size?\n- Small\n- Large' });
+    await f.scan();
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0].text, /Which size/);
+    assert.doesNotMatch(f.sent[0].text, /Which old color/);
+  } finally { f.cleanup(); }
+});
+
 test('multi-question choices keep their original indexes after another question is answered', async () => {
   const f = fixture(); try {
     const h = f.put('multi', 'input');

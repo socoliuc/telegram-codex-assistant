@@ -23,6 +23,8 @@ function containsRequest(turn, marker) {
 // message keyed by its tool call, omitting delivery/questions and waiting flags.
 const isQuestion = item => item.type === 'agentMessage' && (item.questions?.length ||
   (item.text && (item.delivery === 'async' || (item.phase === 'final_answer' && item.id?.startsWith('call_')))));
+const isFinalMessage = item => item.type === 'agentMessage' && [undefined, null, 'final_answer'].includes(item.phase) &&
+  !isQuestion(item) && item.text;
 function* structuredAnswers(item) {
   if (item.type !== 'userMessage') return;
   for (const content of item.content || []) {
@@ -86,7 +88,7 @@ function finalMessages(turn) {
     }
   }
   return items.slice(cutoff + 1)
-    .filter(item => item.type === 'agentMessage' && [undefined, null, 'final_answer'].includes(item.phase) && !isQuestion(item) && item.text)
+    .filter(isFinalMessage)
     .map(item => item.text);
 }
 function hasFollowUp(turn) {
@@ -206,7 +208,7 @@ export class DesktopMonitor {
       // An owner-scheduled reminder may verify its exact older source once due;
       // expired metadata alone cannot certify an active native request.
       const dueReminders = new Set(Object.values(this.inbox.data.items).filter(item => item.source === 'desktop' &&
-        isOpen(item) && needsAttention(item) && item.reminder === 'pending' && item.snoozedUntil <= this.now() &&
+        isOpen(item) && !item.questionPageMissing && needsAttention(item) && item.reminder === 'pending' && item.snoozedUntil <= this.now() &&
         this.now() - item.observedAt >= 120_000).map(item => item.route?.threadId));
       const recordFailure = (row, failedTurnId) => {
         const previous = watch.threads[row.id], failureCount = Math.min(10, (previous?.failureCount || 0) + 1);
@@ -216,7 +218,8 @@ export class DesktopMonitor {
       };
       const refreshUnchanged = (row, previous) => {
         for (const item of Object.values(this.inbox.data.items)) {
-          if (item.source === 'desktop' && item.route?.threadId === row.id && item.route.turnId === previous.latestTurnId && isOpen(item))
+          if (item.source === 'desktop' && item.route?.threadId === row.id && item.route.turnId === previous.latestTurnId &&
+              isOpen(item) && !item.questionPageMissing)
             item.observedAt = this.inbox.now();
         }
         previous.checkedAt = this.now(); previous.updatedAt = row.updatedAt; previous.status = row.status;
@@ -327,12 +330,26 @@ export class DesktopMonitor {
         const nativeWaiting = flags.some(f => ['waitingOnApproval','waitingOnUserInput'].includes(f));
         const answered = answeredQuestions(data.turns);
         const seen = new Set();
-        // Structured replies may live in a newer turn than their saved
-        // question. Preserve confirmed partial indexes across those turns.
+        const latest = data.turns[0];
+        const latestItems = latest?.items || [];
+        const mayOmitQuestion = latest?.nextItemCursor && (latest.status === 'inProgress' ||
+          (latest.status === 'completed' && !latestItems.some(isFinalMessage)));
         for (const item of Object.values(this.inbox.data.items)) {
           const questionId = item.route?.questionItemId;
-          if (item.source !== 'desktop' || item.route?.threadId !== thread.id || !questionId || !isOpen(item) ||
-              data.turns.some(turn => turn.id === item.route.turnId) || !answered.has(questionId)) continue;
+          if (item.source !== 'desktop' || !questionId || item.route.threadId !== thread.id || !isOpen(item)) continue;
+          if (item.questionPageMissing && latest && latest.id !== item.route.turnId) {
+            this.inbox.resolve(item, 'Codex moved on to a newer turn.');
+            continue;
+          }
+          // Preserve an existing card while its question may be on an older
+          // item page. This does not rediscover or notify the question.
+          if (mayOmitQuestion && item.route.turnId === latest.id && !latestItems.some(candidate => candidate.id === questionId)) {
+            seen.add(item.id);
+            item.questionPageMissing = true;
+          }
+          // Structured replies can outlast the visible question or be in a
+          // newer turn. Preserve confirmed partial indexes in either case.
+          if (!answered.has(questionId) || data.turns.some(turn => turn.items?.some(candidate => candidate.id === questionId))) continue;
           const choices = item.choiceQuestions || [];
           let complete;
           if (choices.length) {
@@ -343,7 +360,6 @@ export class DesktopMonitor {
           } else complete = isAnswered({ id: questionId, text: item.route.context || '' }, answered);
           if (complete) this.inbox.resolve(item, 'Answered in Codex.');
         }
-        const latest = data.turns[0];
         const latestFollowUpAt = hasFollowUp(latest) && Number(latest.startedAt) * 1000;
         if (latest && (latestFollowUpAt > 0 || verifyDirect)) {
           for (const item of Object.values(this.inbox.data.items)) {
@@ -373,10 +389,10 @@ export class DesktopMonitor {
             direct: Boolean(request), telegramReplyTo: request?.telegramReplyTo,
             origin: { cwd: thread.cwd, projectId: thread.projectId || null }, imageRoots: [thread.cwd, ...(project?.roots || [])].filter(Boolean) };
           const lastQuestion = (turn.items || []).findLastIndex(i=>isQuestion(i) && !isAnswered(i, answered));
-          const lastFinal = (turn.items || []).findLastIndex(i=>i.type==='agentMessage' && [undefined,null,'final_answer'].includes(i.phase) && !isQuestion(i) && i.text);
+          const lastFinal = (turn.items || []).findLastIndex(isFinalMessage);
           const hasQuestion = turn.id === data.turns[0]?.id && lastQuestion>=0 &&
             (!terminal.has(turn.status) || (turn.status==='completed' && lastQuestion>lastFinal));
-          for (const item of turn.items || []) {
+          for (const [index, item] of (turn.items || []).entries()) {
             if (!isQuestion(item)) continue;
             if (isAnswered(item, answered)) {
               const key = `desktop:${hostId}:${thread.id}:${turn.id}:question:${item.id}`;
@@ -384,7 +400,7 @@ export class DesktopMonitor {
               if (known) this.inbox.resolve(known, 'Answered in Codex.');
               continue;
             }
-            if (!hasQuestion) continue;
+            if (!hasQuestion || (turn.status === 'completed' && index <= lastFinal)) continue;
             const questionKey = `${hostId}:${thread.id}:${turn.id}:question:${item.id}`;
             // Baseline unknown historical broadcasts, but never use their age
             // as evidence that a previously observed request was answered.
@@ -479,12 +495,28 @@ export class DesktopMonitor {
     this.store.save();
     return item;
   }
+  async readQuestionItems(route, turn) {
+    let items = turn.items || [], cursor = turn.nextItemCursor;
+    // Only an explicit reply pays for deeper history. Check newer pages too,
+    // since they can contain the native answer to a question on an older page.
+    for (let page = 0; cursor && page < 5 && !items.some(item => item.id === route.questionItemId); page++) {
+      const older = await this.tools.readItems(route.threadId, route.hostId, cursor);
+      if (!Array.isArray(older.items) || older.nextItemCursor === cursor)
+        throw new Error('The original question history could not be verified.');
+      items = [...older.items, ...items];
+      cursor = older.nextItemCursor;
+    }
+    if (cursor && !items.some(item => item.id === route.questionItemId))
+      throw new Error('The original question is outside the available history. Check it in Codex.');
+    return items;
+  }
   async reply(route, text, updateId, images = [], { telegramReplyTo, ...answer } = {}) {
     const choice = answer.questionIndex === undefined ? undefined : answer;
     const id = String(updateId);
     if (this.store.data.desktopSubmissions[id]) throw new Error('This reply was already submitted or has an unknown outcome; inspect the original Codex conversation.');
     if (!route?.threadId || route.hostId !== 'local') throw new Error('The original conversation route is unavailable.');
-    const current = await this.tools.read(route.threadId, route.hostId, route.kind === 'chat' ? { turnLimit: 1 } : undefined);
+    const questionRoute = route.kind === 'input' && route.questionItemId;
+    let current = await this.tools.read(route.threadId, route.hostId, route.kind === 'chat' || questionRoute ? { turnLimit: 1 } : undefined);
     if (current?.thread?.id !== route.threadId) throw new Error('The original conversation is unavailable. Nothing was sent to another project.');
     if (route.kind === 'chat' && (this.excludeThreadIds().includes(route.threadId) ||
         projectForChat(this.loadProjects(), current.thread.cwd, current.thread.projectId)?.id !== route.projectId))
@@ -492,22 +524,56 @@ export class DesktopMonitor {
     const item = route.inboxId && this.inbox.get(route.inboxId);
     let savedChoices = [];
     if (['input', 'approval'].includes(route.kind)) {
-      const turn = current.turns?.find(t => t.id === route.turnId);
-      const question = route.questionItemId && turn?.items?.find(i => i.id === route.questionItemId);
+      const closed = 'That request is no longer pending. Your reply was not submitted as new work.';
+      const currentTurn = () => {
+        const turn = current?.turns?.[0];
+        if (current?.thread?.id !== route.threadId || !turn || (item && !isOpen(item))) throw new Error(closed);
+        if (turn.id !== route.turnId) {
+          if (item?.questionPageMissing) this.inbox.resolve(item, 'Codex moved on to a newer turn.');
+          throw new Error(closed);
+        }
+        return turn;
+      };
+      let turn = currentTurn();
+      if (questionRoute && turn.nextItemCursor && !turn.items?.some(i => i.id === questionRoute)) {
+        const history = await this.readQuestionItems(route, turn);
+        current = await this.tools.read(route.threadId, route.hostId, { turnLimit: 1 });
+        const latest = currentTurn();
+        // Paging can take several round trips. Merge the fresh head at its
+        // overlap so answers or a final message that just arrived are checked.
+        const headId = latest.items?.[0]?.id;
+        const overlap = headId ? history.findIndex(i => i.id === headId) : -1;
+        if (overlap < 0) throw new Error('Codex activity changed while checking the question. Try the answer again.');
+        turn = { ...latest, items: [...history.slice(0, overlap), ...latest.items] };
+      }
+      const questionIndex = route.questionItemId ? (turn.items || []).findIndex(i => i.id === route.questionItemId) : -1;
+      const question = turn.items?.[questionIndex];
+      const answered = answeredQuestions([turn, ...current.turns.slice(1)]);
+      const nativeAnswered = question && isAnswered(question, answered);
+      const superseded = question && terminal.has(turn.status) &&
+        (turn.status !== 'completed' || questionIndex <= turn.items.findLastIndex(isFinalMessage));
+      if (item && (nativeAnswered || superseded))
+        this.inbox.resolve(item, nativeAnswered ? 'Answered in Codex.' : 'The Codex turn ended after this question.');
+      const choices = questionChoices(question);
+      const nativeAnswers = answered.get(route.questionItemId);
+      if (item && nativeAnswers?.length && !nativeAnswered) {
+        const indexes = new Set(item.answeredQuestionIndexes || []);
+        for (const q of choices) if (questionAnswered(q, nativeAnswers)) indexes.add(q.index);
+        if (indexes.size > (item.answeredQuestionIndexes?.length || 0)) {
+          item.answeredQuestionIndexes = [...indexes].sort((a, b) => a - b);
+          this.store.save();
+        }
+      }
       const flags = current.thread.status?.activeFlags || [];
-      const lastQuestion = (turn?.items || []).findLastIndex(i => isQuestion(i) && !isAnswered(i, answeredQuestions(current.turns)));
-      const lastFinal = (turn?.items || []).findLastIndex(i => i.type === 'agentMessage' && [undefined,null,'final_answer'].includes(i.phase) && !isQuestion(i) && i.text);
-      if ((item && !isOpen(item)) || !turn || current.turns[0]?.id !== route.turnId ||
-          (route.questionItemId && (!question || (terminal.has(turn.status) && (turn.status !== 'completed' || lastQuestion < lastFinal)))) ||
-          (question && isAnswered(question, answeredQuestions(current.turns))) ||
+      if ((item && !isOpen(item)) || (route.questionItemId && !question) || nativeAnswered || superseded ||
           (route.nativeWaiting && !flags.includes(route.kind === 'approval' ? 'waitingOnApproval' : 'waitingOnUserInput')))
-        throw new Error('That request is no longer pending. Your reply was not submitted as new work.');
+        throw new Error(closed);
       if (route.kind === 'input' && (item?.answerSubmissionId || item?.replySentAt))
         throw new Error('An answer was already submitted or is awaiting confirmation. Check the original conversation before continuing.');
       if (choice) {
-        const choices = questionChoices(question), selected = choices.find(q => q.index === choice.questionIndex);
+        const selected = choices.find(q => q.index === choice.questionIndex);
         if (!item || route.kind !== 'input' || route.nativeWaiting || choiceRevision(choices) !== choice.revision ||
-            !selected || selected.options[choice.optionIndex] === undefined || questionAnswered(selected, answeredQuestions(current.turns).get(question.id)))
+            !selected || selected.options[choice.optionIndex] === undefined || questionAnswered(selected, nativeAnswers))
           throw new Error('That choice changed or was already answered. Open Details for the current question.');
         item.choiceSubmissions ||= {};
         item.choiceSubmissions[selected.index] ||= { requestId: id, at: Date.now() };
@@ -515,9 +581,8 @@ export class DesktopMonitor {
           questionRevision: choiceRevision([selected]), optionIndex: choice.optionIndex });
       }
       if (question && item) {
-        const choices = questionChoices(question);
         reconcileSavedChoices(item, choices);
-        const pending = choices.filter(q => !questionAnswered(q, answeredQuestions(current.turns).get(question.id)));
+        const pending = choices.filter(q => !questionAnswered(q, nativeAnswers));
         savedChoices = pending.flatMap(q => {
           const saved = item.choiceSubmissions?.[q.index];
           if (saved?.status !== 'saved') return [];

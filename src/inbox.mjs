@@ -34,6 +34,7 @@ export class Inbox {
     // callback claims are separate; refreshing a scan must never erase them.
     if (values.choiceQuestions) {
       item.choiceQuestions = values.choiceQuestions;
+      delete item.questionPageMissing;
       reconcileSavedChoices(item, values.choiceQuestions);
       item.text = redact(values.text);
     }
